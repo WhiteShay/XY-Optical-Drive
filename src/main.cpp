@@ -43,14 +43,16 @@ IPAddress ip(169, 254, 43, 138);
 IPAddress subnet(255, 255, 0 , 0);
 // IPAddress myDns(8, 8, 8, 8); // Not strictly used for local control
 
+// ================= WEB SERVER =================
+EthernetServer server(80);
+
+
 // ================= MOTOR CONTROL PINS =================
 // Pin 4 is reserved as SD card CS on the Ethernet Shield — do not use it here.
 const uint8_t PIN_MOTOR_CW  = 2;  // DO: Clockwise direction output
 const uint8_t PIN_MOTOR_CCW = 5;  // DO: Counter-clockwise direction output
 
-// ================= WEB SERVER =================
-EthernetServer server(80);
-
+// ================= HELPER STRUCTURES =================
 // Status result structures (small, minimal RAM) for logging to SD file
 struct EthernetStatus {
   bool detected;
