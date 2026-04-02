@@ -52,6 +52,10 @@ EthernetServer server(80);
 const uint8_t PIN_MOTOR_CW  = 2;  // DO: Clockwise direction output
 const uint8_t PIN_MOTOR_CCW = 5;  // DO: Counter-clockwise direction output
 
+// ================= GLOBAL STATE =================
+bool gSdReady = false;
+bool gEthReady = false;
+
 // ================= HELPER STRUCTURES =================
 // Status result structures (small, minimal RAM) for logging to SD file
 struct EthernetStatus {
@@ -83,10 +87,52 @@ void ActiveSD(); // Activate SD card on SPI bus (de-select Ethernet, select SD)
 void activeEthernet(); // Activate Ethernet on SPI bus (de-select SD, select Ethernet) - not currently used but can be useful for future development of HTML page to display status and control motors.
 bool getSDFreeSpaceKB(const SdVolume &volume, uint32_t &freeKB);
 void printIPAddress(Print &out, const IPAddress &address);
+void printSPIPinStatus(Print &out, const __FlashStringHelper *label);
 
 void handleClient(EthernetClient client);
 void sendStatusResponse(EthernetClient client);
 void sendHTMLPage(EthernetClient client);
+
+void printSPIPinStatus(Print &out, const __FlashStringHelper *label) {
+  struct PinDescription {
+    uint8_t pin;
+    const __FlashStringHelper *name;
+  };
+
+  const PinDescription pins[] = {
+    {4, F("SD_CS")},
+    {10, F("ETH_CS")},
+    {11, F("MOSI")},
+    {12, F("MISO")},
+    {13, F("SCK")}
+  };
+
+  out.println();
+  out.print(F("--- SPI Pin Status: "));
+  out.print(label);
+  out.println(F(" ---"));
+
+  for (uint8_t index = 0; index < (sizeof(pins) / sizeof(pins[0])); index++) {
+    const uint8_t pin = pins[index].pin;
+    const uint8_t port = digitalPinToPort(pin);
+
+    out.print(pins[index].name);
+    out.print(F(" (D"));
+    out.print(pin);
+    out.print(F("): mode="));
+
+    if (port == NOT_A_PIN) {
+      out.print(F("UNKNOWN"));
+    } else {
+      volatile uint8_t *modeRegister = portModeRegister(port);
+      const uint8_t bitMask = digitalPinToBitMask(pin);
+      out.print((*modeRegister & bitMask) ? F("OUTPUT") : F("INPUT"));
+    }
+
+    out.print(F(", level="));
+    out.println(digitalRead(pin) == HIGH ? F("1") : F("0"));
+  }
+}
 
 EthernetStatus checkEthernetStatus(Print &out) {
   EthernetStatus status = {};
@@ -145,75 +191,84 @@ EthernetStatus checkEthernetStatus(Print &out) {
 
 SDCardStatus checkSDCardStatus(Print &out) {
   SDCardStatus status = {};
-
   out.println(F("\n--- SD Card Status ---"));
 
+  digitalWrite(10, HIGH);   // deselect Ethernet
+  delay(20);
   ActiveSD();
+  delay(20);
+
+  if (!gSdReady) {
+    gSdReady = SD.begin(4);  // Retry SD init once if it failed during setup
+  }
 
   // Check if SD card is present and can be initialized
-  if (!SD.begin(4)) {  // SD card CS pin is usually pin 4 on Ethernet shields
+  if (!gSdReady) {
     out.println(F("SD card: NOT DETECTED or FAILED TO INITIALIZE"));
     out.println(F("Possible reasons:"));
     out.println(F("- No SD card inserted"));
     out.println(F("- SD card not formatted properly"));
     out.println(F("- Wrong CS pin (currently using pin 4)"));
+    out.println(F("- SPI conflict with Ethernet shield"));
     status.detected = false;
     status.initialized = false;
-  } else {
-    status.detected = true;
-    status.initialized = true;
-    out.println(F("SD card: DETECTED and INITIALIZED"));
+    activeEthernet();
+    return status;
+  }
 
-    // Get card information
-    Sd2Card card;
-    SdVolume volume;
-    uint32_t volumesize;
+  status.detected = true;
+  status.initialized = true;
+  out.println(F("SD card: DETECTED and INITIALIZED"));
 
-    if (card.init(SPI_HALF_SPEED, 4)) {
-      switch (card.type()) {
-        case SD_CARD_TYPE_SD1:
-          status.cardType = 1;
-          out.println(F("Card type: SD1"));
-          break;
-        case SD_CARD_TYPE_SD2:
-          status.cardType = 2;
-          out.println(F("Card type: SD2"));
-          break;
-        case SD_CARD_TYPE_SDHC:
-          status.cardType = 3;
-          out.println(F("Card type: SDHC"));
-          break;
-        default:
-          status.cardType = 0;
-          out.println(F("Card type: Unknown"));
-      }
+  // Get card information
+  Sd2Card card;
+  SdVolume volume;
 
-      if (volume.init(card)) {
-        status.fatType = volume.fatType();
-        out.print(F("Volume type: FAT"));
-        out.println(status.fatType, DEC);
+  if (card.init(SPI_HALF_SPEED, 4)) {
+    switch (card.type()) {
+      case SD_CARD_TYPE_SD1:
+        status.cardType = 1;
+        out.println(F("Card type: SD1"));
+        break;
+      case SD_CARD_TYPE_SD2:
+        status.cardType = 2;
+        out.println(F("Card type: SD2"));
+        break;
+      case SD_CARD_TYPE_SDHC:
+        status.cardType = 3;
+        out.println(F("Card type: SDHC"));
+        break;
+      default:
+        status.cardType = 0;
+        out.println(F("Card type: Unknown"));
+        break;
+    }
 
-        volumesize = volume.blocksPerCluster();
-        volumesize *= volume.clusterCount();
-        volumesize /= 2;  // SD card blocks are always 512 bytes (1/2 KB)
-        status.volumeKB = volumesize;
-        out.print(F("Volume size: "));
-        out.print(status.volumeKB);
+    if (volume.init(card)) {
+      status.fatType = volume.fatType();
+      out.print(F("Volume type: FAT"));
+      out.println(status.fatType);
+
+      uint32_t volumesize = volume.blocksPerCluster();
+      volumesize *= volume.clusterCount();
+      volumesize /= 2;  // SD card blocks are always 512 bytes (1/2 KB)
+      status.volumeKB = volumesize;
+
+      out.print(F("Volume size: "));
+      out.print(status.volumeKB);
+      out.println(F(" KB"));
+
+      status.freeSpaceKnown = getSDFreeSpaceKB(volume, status.freeKB);
+      if (status.freeSpaceKnown) {
+        out.print(F("Remaining space: "));
+        out.print(status.freeKB);
         out.println(F(" KB"));
-
-        status.freeSpaceKnown = getSDFreeSpaceKB(volume, status.freeKB);
-        if (status.freeSpaceKnown) {
-          out.print(F("Remaining space: "));
-          out.print(status.freeKB);
-          out.println(F(" KB"));
-        } else {
-          out.println(F("Remaining space: Unknown"));
-        }
+      } else {
+        out.println(F("Remaining space: Unknown"));
       }
     }
   }
 
-  // Hand SPI bus control back to Ethernet for network operations.
   activeEthernet();
   return status;
 }
@@ -228,10 +283,10 @@ void activeEthernet() {
   // De-select SDso Ethernet (shield)  can use the SPI bus
   digitalWrite(4, HIGH); // Ensure SD CS is HIGH (de-selected)
   digitalWrite(10, LOW);  // Ethernet CS is active (LOW)
-
 }
 
 bool getSDFreeSpaceKB(const SdVolume &volume, uint32_t &freeKB) {
+  // Walk the FAT table to estimate remaining free space on the mounted SD volume.
   Sd2Card *card = SdVolume::sdCard();
   if (!card) {
     return false;
@@ -285,6 +340,7 @@ bool getSDFreeSpaceKB(const SdVolume &volume, uint32_t &freeKB) {
 }
 
 void printIPAddress(Print &out, const IPAddress &address) {
+  // Print an IP address in dotted decimal format to any Print target.
   for (uint8_t index = 0; index < 4; index++) {
     out.print(address[index], DEC);
     if (index < 3) {
@@ -367,13 +423,12 @@ void writeHardwareStatusToFile(File &file, const EthernetStatus &eth, const SDCa
 void createtxt(const EthernetStatus &eth, const SDCardStatus &sd) {
   Serial.println(F("\n--- SD Card Create .txt Test ---"));
 
-  ActiveSD();
-
-  // Ensure SD is initialized (assumes CS already set correctly)
-  if (!SD.begin(4)) {
+  if (!gSdReady) {
     Serial.println(F("Cannot create file - SD not initialized"));
     return;
   }
+
+  ActiveSD();
 
   // Overwrite existing file so status is fresh each run
   SD.remove("test.txt");
@@ -381,6 +436,7 @@ void createtxt(const EthernetStatus &eth, const SDCardStatus &sd) {
   File file = SD.open("test.txt", FILE_WRITE);
   if (!file) {
     Serial.println(F("Failed to open test.txt for writing"));
+    activeEthernet();
     return;
   }
 
@@ -401,17 +457,17 @@ void createtxt(const EthernetStatus &eth, const SDCardStatus &sd) {
 void verifyAndClearTxtFile() {
   Serial.println(F("\n--- Verifying SD Card .txt File ---"));
 
-  ActiveSD();
-
-  // Ensure SD is initialized
-  if (!SD.begin(4)) {
+  if (!gSdReady) {
     Serial.println(F("Cannot verify file - SD not initialized"));
     return;
   }
 
+  ActiveSD();
+
   // Check if the file exists
   if (!SD.exists("test.txt")) {
     Serial.println(F("test.txt does not exist"));
+    activeEthernet();
     return;
   }
 
@@ -421,6 +477,7 @@ void verifyAndClearTxtFile() {
   File file = SD.open("test.txt", FILE_READ);
   if (!file) {
     Serial.println(F("Failed to open test.txt for reading"));
+    activeEthernet();
     return;
   }
 
@@ -428,6 +485,7 @@ void verifyAndClearTxtFile() {
   if (file.size() == 0) {
     Serial.println(F("test.txt is empty"));
     file.close();
+    activeEthernet();
     return;
   }
 
@@ -438,17 +496,20 @@ void verifyAndClearTxtFile() {
   file = SD.open("test.txt", FILE_WRITE);
   if (!file) {
     Serial.println(F("Failed to open test.txt for clearing"));
+    activeEthernet();
     return;
   }
 
   // Since we opened in FILE_WRITE without writing anything, the file is now empty
   file.close();
+  activeEthernet();
 
   Serial.println(F("test.txt content cleared successfully"));
 }
 
 // ================= WEB SERVER FUNCTIONS =================
 void handleClient(EthernetClient client) {
+  // Route a single HTTP request to the matching status, control, or page handler.
   char request[128] = {0}; // Fixed buffer for HTTP request line
   size_t index = 0;
   while (client.available() && index < sizeof(request) - 1) {
@@ -485,6 +546,7 @@ void handleClient(EthernetClient client) {
 }
 
 void sendStatusResponse(EthernetClient client) {
+  // Return a minimal JSON status payload for external monitoring or debugging.
   client.println(F("HTTP/1.1 200 OK"));
   client.println(F("Content-Type: application/json"));
   client.println();
@@ -494,6 +556,7 @@ void sendStatusResponse(EthernetClient client) {
 }
 
 void sendHTMLPage(EthernetClient client) {
+  // Render the firmware-served control page with status text and motor buttons.
   client.println(F("HTTP/1.1 200 OK"));
   client.println(F("Content-Type: text/html"));
   client.println(F("Connection: close"));
@@ -517,8 +580,7 @@ void sendHTMLPage(EthernetClient client) {
 
   // Read test.txt from SD and stream it directly to client
   ActiveSD();
-  bool sdReady = SD.begin(4);
-  if (!sdReady) {
+  if (!gSdReady) {
     activeEthernet();
     client.println(F("(SD not available)"));
   } else {
@@ -528,14 +590,10 @@ void sendHTMLPage(EthernetClient client) {
       client.println(F("(test.txt not found)"));
     } else {
       uint8_t buf[32];
-      while (true) {
-        ActiveSD();
-        if (!txt.available()) break;
+      while (txt.available()) {
         int n = txt.read(buf, sizeof(buf));
-        activeEthernet();
         if (n > 0) client.write(buf, n);
       }
-      ActiveSD();
       txt.close();
       activeEthernet();
     }
@@ -567,49 +625,90 @@ void sendHTMLPage(EthernetClient client) {
 
 // ================= SETUP =================
 void setup() {
-
-  // Force SPI master mode and ensure both CS lines are de-selected
-  pinMode(10, OUTPUT);         // Ethernet CS (W5500)
+  pinMode(10, OUTPUT);   // Ethernet CS
   digitalWrite(10, HIGH);
-  pinMode(4, OUTPUT);          // SD CS
+
+  pinMode(4, OUTPUT);    // SD CS
   digitalWrite(4, HIGH);
 
-  // Motor direction outputs — both LOW (stopped) at startup
   pinMode(PIN_MOTOR_CW, OUTPUT);
   digitalWrite(PIN_MOTOR_CW, LOW);
   pinMode(PIN_MOTOR_CCW, OUTPUT);
   digitalWrite(PIN_MOTOR_CCW, LOW);
 
-    Serial.begin(9600);
-  while (!Serial) {
-    ; // wait for serial port to connect
+  Serial.begin(9600);
+  delay(1000);
+
+  Serial.println(F("Arduino startup"));
+
+  SPI.begin();
+  delay(50);
+
+  // ---------- Ethernet init ----------
+  activeEthernet();
+  delay(50);
+  Ethernet.begin(mac, ip, subnet);
+  server.begin();
+  gEthReady = true;
+
+  Serial.println(F("Ethernet init done"));
+
+  // ---------- SD init ----------
+  // The W5100/W5500 can hold the SPI bus after Ethernet.begin().
+  // Force it to release by toggling CS lines and resetting SPI.
+  digitalWrite(10, HIGH);   // force Ethernet CS high (deselect)
+  digitalWrite(4, HIGH);    // SD CS high (deselect)
+  SPI.end();                // release SPI bus completely
+  delay(100);
+
+  SPI.begin();              // re-init SPI fresh for SD
+  delay(100);
+
+  // Pulse Ethernet CS to ensure W5100/W5500 fully releases MISO
+  digitalWrite(10, LOW);
+  delay(1);
+  digitalWrite(10, HIGH);
+  delay(50);
+
+  ActiveSD();
+  delay(100);
+
+  // Try SD init with multiple attempts — some cards need retries
+  for (uint8_t attempt = 1; attempt <= 3 && !gSdReady; attempt++) {
+    Serial.print(F("SD init attempt "));
+    Serial.println(attempt);
+    gSdReady = SD.begin(4);
+    if (!gSdReady) {
+      digitalWrite(4, HIGH);   // deselect SD between attempts
+      delay(200 * attempt);    // increasing delay between retries
+      ActiveSD();
+      delay(50);
+    }
   }
 
-  Serial.println(F("Arduino Status Check Starting..."));
-  delay(500); // Delay to let Hardware power up before check
+  if (gSdReady) {
+    Serial.println(F("SD init OK"));
+  } else {
+    Serial.println(F("SD init FAILED"));
+    Serial.println(F("Check: card inserted? FAT16/FAT32 format? contacts clean?"));
+  }
 
-  // Check SPI pin status (10-13) ==> test function to verify SPI communication and pin configuration before checking Ethernet and SD card status
-  // printSPIPinStatus();
+  activeEthernet();
 
-  // Check Ethernet shield status (prints to Serial)
   EthernetStatus ethStatus = checkEthernetStatus(Serial);
-
-  // Start web server only after Ethernet is initialized
-  server.begin();
-
-  // Check SPI pin status (10-13)==> test funct
-  //printSPIPinStatus();
-
-  // Check SD card status (prints to Serial)
   SDCardStatus sdStatus = checkSDCardStatus(Serial);
 
-  // Write the same status output to the SD card file
-  createtxt(ethStatus, sdStatus);
+  if (gSdReady) {
+    createtxt(ethStatus, sdStatus);
+  } else {
+    Serial.println(F("Skipping test.txt creation because SD is not ready"));
+  }
 
   Serial.println(F("Status check complete."));
 }
 
 void loop() {
+  // Process incoming Ethernet clients one request at a time.
   // Handle web clients first
   EthernetClient client = server.available();
   if (client) {
