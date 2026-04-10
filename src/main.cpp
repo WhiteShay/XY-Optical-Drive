@@ -25,7 +25,7 @@
  * * - Webpage buttons to control motor direction and stop - IN PROGRESS => Halted, needs RS485 hardware and testing.
  * * - SD BUG: SD card not initializing on first attempt, needs multiple retries and SPI reset - IN PROGRESS 
  * * 06/04/2026 ==> 20/04/2026 - V0.1.0 - Motor control development => Integration and debugging.
- * * - SD debugging and reliability improvements - IN PROGRESS
+ * * - SD debugging and reliability improvements - DONE-
  * * - Motor control Modbus Library choice and integration - IN PROGRESS 
  */
 
@@ -33,6 +33,7 @@
 #include <SPI.h>
 #include <Ethernet.h>
 #include <SD.h>
+#include <ModbusMaster.h>
 
 // ================= NETWORK CONFIGURATION =================//
 //                    MAC Address: 
@@ -194,13 +195,13 @@ EthernetStatus checkEthernetStatus(Print &out) {
 SDCardStatus checkSDCardStatus(Print &out) {
   SDCardStatus status = {};
   out.println(F("\n--- SD Card Status ---"));
-  printSPIPinStatus(out, F("Before ActiveSD"));
+  //printSPIPinStatus(out, F("Before ActiveSD"));
   
-  delay(500);
+  // delay(500);
   ActiveSD();
-  delay(500);
+  delay(100);
 
-  printSPIPinStatus(out, F("After ActiveSD"));
+  //printSPIPinStatus(out, F("After ActiveSD"));
   
   if (!gSdReady) {
     gSdReady = SD.begin(4);  // Retry SD init once if it failed during setup
@@ -208,11 +209,10 @@ SDCardStatus checkSDCardStatus(Print &out) {
 
   // Check if SD card is present and can be initialized
   if (!gSdReady) {
-    out.println(F("SD card: NOT DETECTED or FAILED TO INITIALIZE"));
+    out.println(F("SD card: NOK"));
     out.println(F("Possible reasons:"));
     out.println(F("- No SD card inserted"));
     out.println(F("- SD card not formatted properly"));
-    out.println(F("- Wrong CS pin (currently using pin 4)"));
     out.println(F("- SPI conflict with Ethernet shield"));
     status.detected = false;
     status.initialized = false;
@@ -222,7 +222,7 @@ SDCardStatus checkSDCardStatus(Print &out) {
 
   status.detected = true;
   status.initialized = true;
-  out.println(F("SD card: DETECTED and INITIALIZED"));
+  out.println(F("SD card: OK"));
 
   // Get card information from the already-initialized SD library internals.
   // Do NOT create a new Sd2Card or call card.init() here — that would
