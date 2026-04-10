@@ -20,9 +20,13 @@
  * * - Status and control of everything to text file (1 Arduino memory, 2 arduino eth+SD card status) -DONE-
  * * - Html page to display status -DONE-
  * * - LED Blink from Webpage. -DONE- 
- * * 23/03/2026 ==> 30/03/2026 - V0.1.0 - Motor control development
+ * * 23/03/2026 ==> 03/04/2026 - V0.1.0 - Motor control development
  * * - Modbus library integration for stepper motor control - IN PROGRESS
- * * - Webpage buttons to control motor direction and stop - IN PROGRESS
+ * * - Webpage buttons to control motor direction and stop - IN PROGRESS => Halted, needs RS485 hardware and testing.
+ * * - SD BUG: SD card not initializing on first attempt, needs multiple retries and SPI reset - IN PROGRESS 
+ * * 06/04/2026 ==> 20/04/2026 - V0.1.0 - Motor control development => Integration and debugging.
+ * * - SD debugging and reliability improvements - IN PROGRESS
+ * * - Motor control Modbus Library choice and integration - IN PROGRESS 
  */
 
 #include <Arduino.h>
@@ -30,33 +34,31 @@
 #include <Ethernet.h>
 #include <SD.h>
 
-// ================= NETWORK CONFIGURATION =================
+// ================= NETWORK CONFIGURATION =================//
 //                    MAC Address: 
 // Specific to your shield. If you change shields, update this.
 byte mac[6] = { 0xA8, 0x61, 0x0A, 0xAE, 0x1C, 0xE4 };
 
 //                    IP Configuration:
 // Currently set to my PC ethernet settings (PC Ip : 169.254.43.137, local).
-// If connecting directly to PC without router, change to 192.168.1.177 or match your PC's Autoconfig IP.
 IPAddress ip(169, 254, 43, 138);
 // IPAddress gateway(169, 254, 43, 1);
 IPAddress subnet(255, 255, 0 , 0);
 // IPAddress myDns(8, 8, 8, 8); // Not strictly used for local control
 
-// ================= WEB SERVER =================
+// ================= WEB SERVER =================//
 EthernetServer server(80);
 
-
-// ================= MOTOR CONTROL PINS =================
+// ================= MOTOR CONTROL PINS =================//
 // Pin 4 is reserved as SD card CS on the Ethernet Shield — do not use it here.
 const uint8_t PIN_MOTOR_CW  = 2;  // DO: Clockwise direction output
 const uint8_t PIN_MOTOR_CCW = 5;  // DO: Counter-clockwise direction output
 
-// ================= GLOBAL STATE =================
+// ================= GLOBAL STATE =================//
 bool gSdReady = false;
 bool gEthReady = false;
 
-// ================= HELPER STRUCTURES =================
+// ================= HELPER STRUCTURES =================//
 // Status result structures (small, minimal RAM) for logging to SD file
 struct EthernetStatus {
   bool detected;
@@ -75,7 +77,7 @@ struct SDCardStatus {
   bool freeSpaceKnown;
 };
 
-// ================= HELPER FUNCTIONS =================
+// ================= HELPER FUNCTIONS =================//
 //                   Function Declarations:
 // Helpers to report hardware status to any Print target (Serial or File)
 EthernetStatus checkEthernetStatus(Print &out);
@@ -98,7 +100,7 @@ void printSPIPinStatus(Print &out, const __FlashStringHelper *label) {
     uint8_t pin;
     const __FlashStringHelper *name;
   };
-
+  // Identification of the pins for SPI(SD)/ETHERNET handling
   const PinDescription pins[] = {
     {4, F("SD_CS")},
     {10, F("ETH_CS")},
@@ -192,12 +194,14 @@ EthernetStatus checkEthernetStatus(Print &out) {
 SDCardStatus checkSDCardStatus(Print &out) {
   SDCardStatus status = {};
   out.println(F("\n--- SD Card Status ---"));
-
-  digitalWrite(10, HIGH);   // deselect Ethernet
-  delay(20);
+  printSPIPinStatus(out, F("Before ActiveSD"));
+  
+  delay(500);
   ActiveSD();
-  delay(20);
+  delay(500);
 
+  printSPIPinStatus(out, F("After ActiveSD"));
+  
   if (!gSdReady) {
     gSdReady = SD.begin(4);  // Retry SD init once if it failed during setup
   }
@@ -220,12 +224,14 @@ SDCardStatus checkSDCardStatus(Print &out) {
   status.initialized = true;
   out.println(F("SD card: DETECTED and INITIALIZED"));
 
-  // Get card information
-  Sd2Card card;
-  SdVolume volume;
+  // Get card information from the already-initialized SD library internals.
+  // Do NOT create a new Sd2Card or call card.init() here — that would
+  // re-send the CMD0/CMD8/ACMD41 reset sequence and corrupt the SD
+  // library's internal state, causing subsequent file operations to fail.
+  Sd2Card *card = SdVolume::sdCard();
 
-  if (card.init(SPI_HALF_SPEED, 4)) {
-    switch (card.type()) {
+  if (card) {
+    switch (card->type()) {
       case SD_CARD_TYPE_SD1:
         status.cardType = 1;
         out.println(F("Card type: SD1"));
@@ -244,7 +250,10 @@ SDCardStatus checkSDCardStatus(Print &out) {
         break;
     }
 
-    if (volume.init(card)) {
+    // Init a SdVolume from the existing card to read partition/FAT info.
+    // This only reads sectors — it does NOT re-initialize the card hardware.
+    SdVolume volume;
+    if (volume.init(*card)) {
       status.fatType = volume.fatType();
       out.print(F("Volume type: FAT"));
       out.println(status.fatType);
@@ -276,7 +285,7 @@ SDCardStatus checkSDCardStatus(Print &out) {
 void ActiveSD() {
   // De-select Ethernet (shield) so SD can use the SPI bus
   digitalWrite(10, HIGH); // Ensure Ethernet CS is HIGH (de-selected)
-  digitalWrite(4, LOW);  // SD CS
+  digitalWrite(4, LOW);  // SD CS is active LOW
 }
 
 void activeEthernet() {
@@ -507,7 +516,7 @@ void verifyAndClearTxtFile() {
   Serial.println(F("test.txt content cleared successfully"));
 }
 
-// ================= WEB SERVER FUNCTIONS =================
+// ================= WEB SERVER FUNCTIONS =================//
 void handleClient(EthernetClient client) {
   // Route a single HTTP request to the matching status, control, or page handler.
   char request[128] = {0}; // Fixed buffer for HTTP request line
@@ -623,16 +632,16 @@ void sendHTMLPage(EthernetClient client) {
   client.println(F("</body></html>"));
 }
 
-// ================= SETUP =================
+// ================= SETUP =================//
 void setup() {
   pinMode(10, OUTPUT);   // Ethernet CS
-  digitalWrite(10, HIGH);
+  digitalWrite(10, HIGH); // Ensure Ethernet is de-selected at startup
 
   pinMode(4, OUTPUT);    // SD CS
-  digitalWrite(4, HIGH);
+  digitalWrite(4, HIGH); // Ensure SD is de-selected at startup
 
   pinMode(PIN_MOTOR_CW, OUTPUT);
-  digitalWrite(PIN_MOTOR_CW, LOW);
+  digitalWrite(PIN_MOTOR_CW, LOW); // Ensure "motor" CW is stopped at startup
   pinMode(PIN_MOTOR_CCW, OUTPUT);
   digitalWrite(PIN_MOTOR_CCW, LOW);
 
@@ -641,36 +650,22 @@ void setup() {
 
   Serial.println(F("Arduino startup"));
 
-  SPI.begin();
-  delay(50);
-
-  // ---------- Ethernet init ----------
+  // ---------- Ethernet init ----------//
   activeEthernet();
-  delay(50);
+  delay(100);
   Ethernet.begin(mac, ip, subnet);
   server.begin();
   gEthReady = true;
 
   Serial.println(F("Ethernet init done"));
-
-  // ---------- SD init ----------
+  delay(100);
+  // ---------- SD init ----------//
   // The W5100/W5500 can hold the SPI bus after Ethernet.begin().
   // Force it to release by toggling CS lines and resetting SPI.
   digitalWrite(10, HIGH);   // force Ethernet CS high (deselect)
   digitalWrite(4, HIGH);    // SD CS high (deselect)
-  SPI.end();                // release SPI bus completely
-  delay(100);
-
-  SPI.begin();              // re-init SPI fresh for SD
-  delay(100);
-
-  // Pulse Ethernet CS to ensure W5100/W5500 fully releases MISO
-  digitalWrite(10, LOW);
-  delay(1);
-  digitalWrite(10, HIGH);
-  delay(50);
-
-  ActiveSD();
+  
+  ActiveSD(); // Select SD to ensure it can initialize without Ethernet interference
   delay(100);
 
   // Try SD init with multiple attempts — some cards need retries
@@ -705,6 +700,7 @@ void setup() {
   }
 
   Serial.println(F("Status check complete."));
+
 }
 
 void loop() {
