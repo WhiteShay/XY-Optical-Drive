@@ -4,8 +4,9 @@
  * Reliable Lab Automation Controller for Arduino Uno + Ethernet Shield + Stepper Motors NEMA 17.
  *  * * HARDWARE STACK:
  * 1. Arduino Uno R3 (Bottom)
- * 2. Ethernet Shield W5100/W5500 (Middle) - Uses SPI (ICSP Header + Pin 10)
- * 3. Integrated Stepper Motor Drivers (e.g., A4988) connected to PC, drive via Modbus communication for step/dir and power.
+ * 2. Ethernet Shield W5100/W5500 (Middle) - Uses SPI bus over Pin 10.
+ * 3. Modbus RTU RS485 hardware converter (Top) - Uses SoftwareSerial on Pins 8 (RX) and 9 (TX).
+ * 4. Integrated Stepper Motor Drivers (e.g., A4988) connected to PC, drive via Modbus communication for step/dir and power.
  * 
  * * ================= REST API REFERENCE =================
  * * 1. GET SYSTEM STATUS
@@ -24,10 +25,14 @@
  * * - Modbus library integration for stepper motor control - IN PROGRESS
  * * - Webpage buttons to control motor direction and stop - IN PROGRESS => Halted, needs RS485 hardware and testing.
  * * - SD BUG: SD card not initializing on first attempt, needs multiple retries and SPI reset - IN PROGRESS 
- * * 06/04/2026 ==> 20/04/2026 - V0.1.0 - Motor control development => Integration and debugging.
+ * * 06/04/2026 ==> 10/04/2026 - V0.1.0 - Motor control development => Integration and debugging.
  * * - SD debugging and reliability improvements - DONE-
  * * - Motor control Modbus Library choice and integration - IN PROGRESS 
- */
+ * * 13/04/2026 ==> 17/04/2026 - V1.1.0 - Motor control development => Integration and debugging.
+ * * - SD HTML handling
+ * * - Simple Motor control via Modubus RTU over RS485 (hardware testing and debugging) - IN PROGRESS
+ * * - Motor control algorithm.
+ * */
 
 #include <Arduino.h>
 #include <SPI.h>
