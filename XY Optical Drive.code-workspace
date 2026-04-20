@@ -1,8 +1,7 @@
 {
-	"folders": [
-		{
-			"path": "../XY Optical Drive"
-		}
-	],
-	"settings": {}
+    "folders": [
+        {
+            "path": "."
+        }
+    ]
 }
