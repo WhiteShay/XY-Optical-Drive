@@ -45,6 +45,7 @@ IPAddress subnet(255, 255, 0 , 0);
 
 // ================= WEB SERVER =================
 EthernetServer server(80);
+bool sdReady = false; // Set to true after successful SD.begin() during setup
 
 
 // ================= MOTOR CONTROL PINS =================
@@ -57,7 +58,6 @@ const uint8_t PIN_MOTOR_CCW = 5;  // DO: Counter-clockwise direction output
 struct EthernetStatus {
   bool detected;
   int hwStatus;
-  uint8_t cardType; // 1=SD1, 2=SD2, 3=SDHC, 0=Unknown
   bool linkOn;
 };
 
@@ -67,8 +67,6 @@ struct SDCardStatus {
   uint8_t cardType; // 1=SD1, 2=SD2, 3=SDHC, 0=Unknown
   int fatType;
   uint32_t volumeKB;
-  uint32_t freeKB;
-  bool freeSpaceKnown;
 };
 
 // ================= HELPER FUNCTIONS =================
@@ -81,11 +79,12 @@ void createtxt(const EthernetStatus &eth, const SDCardStatus &sd); // Create .tx
 void verifyAndClearTxtFile(); //Used to erase the content of the SD .txt file.
 void ActiveSD(); // Activate SD card on SPI bus (de-select Ethernet, select SD)
 void activeEthernet(); // Activate Ethernet on SPI bus (de-select SD, select Ethernet) - not currently used but can be useful for future development of HTML page to display status and control motors.
-bool getSDFreeSpaceKB(const SdVolume &volume, uint32_t &freeKB);
+
 void printIPAddress(Print &out, const IPAddress &address);
 
 void handleClient(EthernetClient client);
 void sendStatusResponse(EthernetClient client);
+void sendHWStatusResponse(EthernetClient client);
 void sendHTMLPage(EthernetClient client);
 
 EthernetStatus checkEthernetStatus(Print &out) {
@@ -108,7 +107,6 @@ EthernetStatus checkEthernetStatus(Print &out) {
     out.println(F("No Ethernet hardware found."));
     status.detected = false;
     status.linkOn = false;
-    status.cardType = 0;
   } else {
     status.detected = true;
     out.println(F("Ethernet shield: DETECTED"));
@@ -132,12 +130,6 @@ EthernetStatus checkEthernetStatus(Print &out) {
       out.println(F("Ethernet communication: NOT AVAILABLE"));
     }
 
-    // Record card type
-    switch (Ethernet.hardwareStatus()) {
-      default:
-        status.cardType = 0;
-        break;
-    }
   }
 
   return status;
@@ -162,6 +154,7 @@ SDCardStatus checkSDCardStatus(Print &out) {
   } else {
     status.detected = true;
     status.initialized = true;
+    sdReady = true;
     out.println(F("SD card: DETECTED and INITIALIZED"));
 
     // Get card information
@@ -201,14 +194,7 @@ SDCardStatus checkSDCardStatus(Print &out) {
         out.print(status.volumeKB);
         out.println(F(" KB"));
 
-        status.freeSpaceKnown = getSDFreeSpaceKB(volume, status.freeKB);
-        if (status.freeSpaceKnown) {
-          out.print(F("Remaining space: "));
-          out.print(status.freeKB);
-          out.println(F(" KB"));
-        } else {
-          out.println(F("Remaining space: Unknown"));
-        }
+        out.println(F("Remaining space: Unknown"));
       }
     }
   }
@@ -231,58 +217,7 @@ void activeEthernet() {
 
 }
 
-bool getSDFreeSpaceKB(const SdVolume &volume, uint32_t &freeKB) {
-  Sd2Card *card = SdVolume::sdCard();
-  if (!card) {
-    return false;
-  }
 
-  const uint8_t fatType = volume.fatType();
-  if (fatType != 16 && fatType != 32) {
-    return false;
-  }
-
-  uint8_t buffer[512];
-  uint32_t cachedBlock = 0xFFFFFFFFUL;
-  uint32_t freeClusters = 0;
-  const uint32_t lastCluster = volume.clusterCount() + 1;
-
-  for (uint32_t cluster = 2; cluster <= lastCluster; cluster++) {
-    uint32_t blockNumber = volume.fatStartBlock();
-    if (fatType == 16) {
-      blockNumber += cluster >> 8;
-    } else {
-      blockNumber += cluster >> 7;
-    }
-
-    if (blockNumber != cachedBlock) {
-      if (!card->readBlock(blockNumber, buffer)) {
-        return false;
-      }
-      cachedBlock = blockNumber;
-    }
-
-    uint32_t entryValue;
-    if (fatType == 16) {
-      uint16_t offset = (cluster & 0xFF) * 2;
-      entryValue = buffer[offset] | (static_cast<uint16_t>(buffer[offset + 1]) << 8);
-    } else {
-      uint16_t offset = (cluster & 0x7F) * 4;
-      entryValue = static_cast<uint32_t>(buffer[offset]);
-      entryValue |= static_cast<uint32_t>(buffer[offset + 1]) << 8;
-      entryValue |= static_cast<uint32_t>(buffer[offset + 2]) << 16;
-      entryValue |= static_cast<uint32_t>(buffer[offset + 3]) << 24;
-      entryValue &= 0x0FFFFFFFUL;
-    }
-
-    if (entryValue == 0) {
-      freeClusters++;
-    }
-  }
-
-  freeKB = (freeClusters * volume.blocksPerCluster()) / 2;
-  return true;
-}
 
 void printIPAddress(Print &out, const IPAddress &address) {
   for (uint8_t index = 0; index < 4; index++) {
@@ -354,13 +289,7 @@ void writeHardwareStatusToFile(File &file, const EthernetStatus &eth, const SDCa
     file.print(F("Volume size: "));
     file.print(sd.volumeKB);
     file.println(F(" KB"));
-    file.print(F("Remaining space: "));
-    if (sd.freeSpaceKnown) {
-      file.print(sd.freeKB);
-      file.println(F(" KB"));
-    } else {
-      file.println(F("Unknown"));
-    }
+    file.println(F("Remaining space: Unknown"));
   }
 }
 
@@ -449,7 +378,7 @@ void verifyAndClearTxtFile() {
 
 // ================= WEB SERVER FUNCTIONS =================
 void handleClient(EthernetClient client) {
-  char request[128] = {0}; // Fixed buffer for HTTP request line
+  char request[48] = {0}; // Fixed buffer for HTTP request line
   size_t index = 0;
   while (client.available() && index < sizeof(request) - 1) {
     char c = client.read();
@@ -475,6 +404,8 @@ void handleClient(EthernetClient client) {
     digitalWrite(PIN_MOTOR_CCW, LOW);
     client.println(F("HTTP/1.1 200 OK"));
     client.println();
+  } else if (strstr(request, "GET /hwstatus ")) {
+    sendHWStatusResponse(client);
   } else if (strstr(request, "GET / ")) {
     sendHTMLPage(client);
   } else {
@@ -493,76 +424,78 @@ void sendStatusResponse(EthernetClient client) {
   client.println(F("}"));
 }
 
+void sendHWStatusResponse(EthernetClient client) {
+  ActiveSD();
+  if (!sdReady) {
+    activeEthernet();
+    client.println(F("HTTP/1.1 503 Service Unavailable"));
+    client.println(F("Content-Type: text/plain"));
+    client.println(F("Connection: close"));
+    client.println();
+    client.println(F("SD not available"));
+    return;
+  }
+  client.println(F("HTTP/1.1 200 OK"));
+  client.println(F("Content-Type: text/plain"));
+  client.println(F("Connection: close"));
+  client.println();
+  File txt = SD.open("test.txt", FILE_READ);
+  if (!txt) {
+    activeEthernet();
+    client.println(F("test.txt not found"));
+    return;
+  }
+  uint8_t buf[32];
+  while (true) {
+    ActiveSD();
+    if (!txt.available()) break;
+    int n = txt.read(buf, sizeof(buf));
+    activeEthernet();
+    if (n > 0) client.write(buf, n);
+  }
+  ActiveSD();
+  txt.close();
+  activeEthernet();
+}
+
+// Serve index.htm from SD card.
+// Copy Web/index.html to the SD card as index.htm (SD library uses 8.3 filenames).
 void sendHTMLPage(EthernetClient client) {
+  ActiveSD();
+  if (!sdReady) {
+    activeEthernet();
+    client.println(F("HTTP/1.1 503 Service Unavailable"));
+    client.println(F("Content-Type: text/html"));
+    client.println(F("Connection: close"));
+    client.println();
+    client.println(F("<html><body>SD not available</body></html>"));
+    return;
+  }
+  File html = SD.open("index.htm", FILE_READ);
+  if (!html) {
+    activeEthernet();
+    client.println(F("HTTP/1.1 404 Not Found"));
+    client.println(F("Content-Type: text/html"));
+    client.println(F("Connection: close"));
+    client.println();
+    client.println(F("<html><body>index.htm not found on SD card</body></html>"));
+    return;
+  }
   client.println(F("HTTP/1.1 200 OK"));
   client.println(F("Content-Type: text/html"));
   client.println(F("Connection: close"));
   client.println();
-
-  client.println(F("<!DOCTYPE html>"));
-  client.println(F("<html><head><meta charset=\"UTF-8\">"));
-  client.println(F("<title>XY Optical Drive V0.1.0</title></head>"));
-  client.println(F("<body style='font-family:Arial, sans-serif;padding:16px;'>"));
-  client.println(F("<h1>XY Optical Drive</h1>"));
-  client.println(F("<p><strong>Version:</strong> V0.1.0</p>"));
-  client.println(F("<p>Page generated directly by firmware.</p>"));
-  client.println(F("<p>API status endpoint: <a href='/status'>/status</a></p>"));
-  client.print(F("<p><em>Uptime: "));
-  client.print(millis() / 1000UL);
-  client.println(F(" s</em></p>"));
-
-  // --- Hardware Setup Report (test.txt) ---
-  client.println(F("<hr><h2>Hardware Setup Report</h2>"));
-  client.println(F("<pre style='background:#f4f4f4;padding:12px;border:1px solid #ccc;white-space:pre-wrap;'>"));
-
-  // Read test.txt from SD and stream it directly to client
-  ActiveSD();
-  bool sdReady = SD.begin(4);
-  if (!sdReady) {
+  uint8_t buf[32];
+  while (true) {
+    ActiveSD();
+    if (!html.available()) break;
+    int n = html.read(buf, sizeof(buf));
     activeEthernet();
-    client.println(F("(SD not available)"));
-  } else {
-    File txt = SD.open("test.txt", FILE_READ);
-    if (!txt) {
-      activeEthernet();
-      client.println(F("(test.txt not found)"));
-    } else {
-      uint8_t buf[32];
-      while (true) {
-        ActiveSD();
-        if (!txt.available()) break;
-        int n = txt.read(buf, sizeof(buf));
-        activeEthernet();
-        if (n > 0) client.write(buf, n);
-      }
-      ActiveSD();
-      txt.close();
-      activeEthernet();
-    }
+    if (n > 0) client.write(buf, n);
   }
-
-  client.println(F("</pre>"));
-
-  // --- Motor Control ---
-  client.println(F("<hr><h2>Motor Control</h2>"));
-  client.println(F("<style>.mb{font-size:1.2em;padding:10px 20px;border:none;border-radius:6px;cursor:pointer;background:#e0e0e0;margin-right:4px;}</style>"));
-  client.println(F("<div style='margin:12px 0;'>"));
-  client.println(F("<button id='b-ccw' class='mb' onclick='cmd(\"ccw\")'>&#9664; CCLKW</button>"));
-  client.println(F("<button id='b-stop' class='mb' onclick='cmd(\"stop\")'>&#9646;&#9646; Stop</button>"));
-  client.println(F("<button id='b-cw' class='mb' onclick='cmd(\"cw\")'>CLKW &#9654;</button>"));
-  client.println(F("</div>"));
-  client.println(F("<p id='ms'>Status: Stopped</p>"));
-  client.println(F("<script>"));
-  client.println(F("var L={cw:'Running CW',ccw:'Running CCLKW',stop:'Stopped'};"));
-  client.println(F("var B=['cw','ccw','stop'];"));
-  client.println(F("function cmd(d){fetch('/'+d).then(function(){"));
-  client.println(F("document.getElementById('ms').textContent='Status: '+L[d];"));
-  client.println(F("B.forEach(function(x){var b=document.getElementById('b-'+x);"));
-  client.println(F("b.style.background=x===d?'#4CAF50':'#e0e0e0';"));
-  client.println(F("b.style.color=x===d?'white':'black';});});}"));
-  client.println(F("</script>"));
-
-  client.println(F("</body></html>"));
+  ActiveSD();
+  html.close();
+  activeEthernet();
 }
 
 // ================= SETUP =================

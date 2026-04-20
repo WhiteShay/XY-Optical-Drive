@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>XY Optical Drive V0.1.0</title>
+</head>
+<body style="font-family:Arial, sans-serif; padding:16px;">
+  <h1>XY Optical Drive</h1>
+  <p><strong>Version:</strong> V0.1.0</p>
+  <p>Page generated directly by firmware.</p>
+  <p>API status endpoint: <a href="/status">/status</a></p>
+  <p><em>Uptime: <span id="uptime">...</span></em></p>
+
+  <hr>
+  <h2>Hardware Setup Report</h2>
+  <pre id="hwstatus" style="background:#f4f4f4; padding:12px; border:1px solid #ccc; white-space:pre-wrap;">Loading...</pre>
+
+  <hr>
+  <h2>Motor Control</h2>
+  <style>
+    .mb { font-size:1.2em; padding:10px 20px; border:none; border-radius:6px; cursor:pointer; background:#e0e0e0; margin-right:4px; }
+  </style>
+  <div style="margin:12px 0;">
+    <button id="b-ccw" class="mb" onclick="cmd('ccw')">&#9664; CCLKW</button>
+    <button id="b-stop" class="mb" onclick="cmd('stop')">&#9646;&#9646; Stop</button>
+    <button id="b-cw" class="mb" onclick="cmd('cw')">CLKW &#9654;</button>
+  </div>
+  <p id="ms">Status: Stopped</p>
+
+  <script>
+    fetch('/status').then(function(r){ return r.json(); }).then(function(d){
+      document.getElementById('uptime').textContent = Math.floor(d.uptime / 1000) + ' s';
+    });
+
+    fetch('/hwstatus').then(function(r){ return r.text(); }).then(function(t){
+      document.getElementById('hwstatus').textContent = t;
+    });
+
+    var L = { cw: 'Running CW', ccw: 'Running CCLKW', stop: 'Stopped' };
+    var B = ['cw', 'ccw', 'stop'];
+    function cmd(d) {
+      fetch('/' + d).then(function() {
+        document.getElementById('ms').textContent = 'Status: ' + L[d];
+        B.forEach(function(x) {
+          var b = document.getElementById('b-' + x);
+          b.style.background = x === d ? '#4CAF50' : '#e0e0e0';
+          b.style.color = x === d ? 'white' : 'black';
+        });
+      });
+    }
+  </script>
+</body>
+</html>
