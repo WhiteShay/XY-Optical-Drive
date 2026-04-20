@@ -29,6 +29,8 @@
 #include <SPI.h>
 #include <Ethernet.h>
 #include <SD.h>
+#include <ModbusMaster.h>
+#include <EEPROM.h>
 
 // ================= NETWORK CONFIGURATION =================
 //                    MAC Address: 
