@@ -1,0 +1,10 @@
+[
+  {
+    "Name": "Arduino1",
+    "Role": "X axis",
+    "IpAddress": "169.254.43.138",
+    "IsOnline": false,
+    "StatusInfo": "",
+    "StatusText": "Hors ligne"
+  }
+]

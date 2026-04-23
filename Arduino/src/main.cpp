@@ -21,8 +21,22 @@
  * * - Html page to display status -DONE-
  * * - LED Blink from Webpage. -DONE- 
  * * 23/03/2026 ==> 30/03/2026 - V0.1.0 - Motor control development
- * * - Modbus library integration for stepper motor control - IN PROGRESS
- * * - Webpage buttons to control motor direction and stop - IN PROGRESS
+ * * - Modbus library integration for stepper motor control - DONE-
+ * * - Webpage buttons to control motor direction and stop - STANDBY (Requires ordered hardware)
+ * * 30/03/2026 ==> 10/04/2026 - V0.1.0 - Finalize motor control and testing
+ * *  - HTML on SD card - DONE -
+ * *  - Full app architecture OK (PC - Arduino Web Server) - DONE -
+ * *  - Functional IP adress sweep for Arduino discovery. - IN PROGRESS --> up to V1.0.0
+ * * 13/04/2026 ==> 20/04/2026 - V1.0.1->V1.0.3 - First test Modbus motor control.
+ * * *  - Test Modbus communication with motor drivers. - IN PROGRESS
+ * *  - V1.0.2: Homing + 0 definition - TO DO
+ * *  - V1.0.3: Move CW/CCW + position increment - TO DO
+ * 27/04/2026 ==> 15/05/2026 - V1.0.3->V1.0.7 - Finalize motor control and testing
+ * *  - V1.0.3: Speed switch. - TO DO
+ * *  - V1.0.4: Emergency Stop. - TO DO
+ * *  - V1.0.5: Save position - TO DO
+ * *  - V1.0.6: Go to position mode - TO DO
+ * 
  */
 
 #include <Arduino.h>
