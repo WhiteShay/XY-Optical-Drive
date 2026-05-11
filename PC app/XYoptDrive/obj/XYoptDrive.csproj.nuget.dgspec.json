@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Users\\WhiteShay_TUF\\OneDrive\\Bureau\\Etudes\\INSA GE copy\\GE5_25\\PFE\\QNS\\Project XY stage\\2-Software\\XY Optical Drive\\PC app\\docs\\XY optical drive app\\XYoptDrive\\XYoptDrive.csproj": {}
+    "C:\\Users\\WhiteShay_TUF\\OneDrive\\Bureau\\Etudes\\INSA GE copy\\GE5_25\\PFE\\QNS\\Project XY stage\\2-Software\\XY Optical Drive\\PC app\\XYoptDrive\\XYoptDrive.csproj": {}
   },
   "projects": {
-    "C:\\Users\\WhiteShay_TUF\\OneDrive\\Bureau\\Etudes\\INSA GE copy\\GE5_25\\PFE\\QNS\\Project XY stage\\2-Software\\XY Optical Drive\\PC app\\docs\\XY optical drive app\\XYoptDrive\\XYoptDrive.csproj": {
+    "C:\\Users\\WhiteShay_TUF\\OneDrive\\Bureau\\Etudes\\INSA GE copy\\GE5_25\\PFE\\QNS\\Project XY stage\\2-Software\\XY Optical Drive\\PC app\\XYoptDrive\\XYoptDrive.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Users\\WhiteShay_TUF\\OneDrive\\Bureau\\Etudes\\INSA GE copy\\GE5_25\\PFE\\QNS\\Project XY stage\\2-Software\\XY Optical Drive\\PC app\\docs\\XY optical drive app\\XYoptDrive\\XYoptDrive.csproj",
+        "projectUniqueName": "C:\\Users\\WhiteShay_TUF\\OneDrive\\Bureau\\Etudes\\INSA GE copy\\GE5_25\\PFE\\QNS\\Project XY stage\\2-Software\\XY Optical Drive\\PC app\\XYoptDrive\\XYoptDrive.csproj",
         "projectName": "XYoptDrive",
-        "projectPath": "C:\\Users\\WhiteShay_TUF\\OneDrive\\Bureau\\Etudes\\INSA GE copy\\GE5_25\\PFE\\QNS\\Project XY stage\\2-Software\\XY Optical Drive\\PC app\\docs\\XY optical drive app\\XYoptDrive\\XYoptDrive.csproj",
+        "projectPath": "C:\\Users\\WhiteShay_TUF\\OneDrive\\Bureau\\Etudes\\INSA GE copy\\GE5_25\\PFE\\QNS\\Project XY stage\\2-Software\\XY Optical Drive\\PC app\\XYoptDrive\\XYoptDrive.csproj",
         "packagesPath": "C:\\Users\\WhiteShay_TUF\\.nuget\\packages\\",
-        "outputPath": "C:\\Users\\WhiteShay_TUF\\OneDrive\\Bureau\\Etudes\\INSA GE copy\\GE5_25\\PFE\\QNS\\Project XY stage\\2-Software\\XY Optical Drive\\PC app\\docs\\XY optical drive app\\XYoptDrive\\obj\\",
+        "outputPath": "C:\\Users\\WhiteShay_TUF\\OneDrive\\Bureau\\Etudes\\INSA GE copy\\GE5_25\\PFE\\QNS\\Project XY stage\\2-Software\\XY Optical Drive\\PC app\\XYoptDrive\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "C:\\Users\\WhiteShay_TUF\\AppData\\Roaming\\NuGet\\NuGet.Config"
@@ -61,7 +61,7 @@
               "privateAssets": "none"
             }
           },
-          "runtimeIdentifierGraphPath": "C:\\Users\\WhiteShay_TUF\\AppData\\Local\\Microsoft\\dotnet\\sdk\\8.0.420/PortableRuntimeIdentifierGraph.json"
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\8.0.420/PortableRuntimeIdentifierGraph.json"
         }
       }
     }

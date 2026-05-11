@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("XYoptDrive")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+ee95966f894c016bb50de2cd58b76b70645a9480")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+41035a105ba5888b5fea2764013962e65395f5b5")]
 [assembly: System.Reflection.AssemblyProductAttribute("XYoptDrive")]
 [assembly: System.Reflection.AssemblyTitleAttribute("XYoptDrive")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

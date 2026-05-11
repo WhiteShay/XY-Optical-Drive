@@ -18,3 +18,23 @@ C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Projec
 C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\docs\XY optical drive app\XYoptDrive\obj\Debug\net8.0-windows\XYoptDrive.pdb
 C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\docs\XY optical drive app\XYoptDrive\obj\Debug\net8.0-windows\XYoptDrive.genruntimeconfig.cache
 C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\docs\XY optical drive app\XYoptDrive\obj\Debug\net8.0-windows\ref\XYoptDrive.dll
+C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\XYoptDrive\bin\Debug\net8.0-windows\XYoptDrive.exe
+C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\XYoptDrive\bin\Debug\net8.0-windows\XYoptDrive.deps.json
+C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\XYoptDrive\bin\Debug\net8.0-windows\XYoptDrive.runtimeconfig.json
+C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\XYoptDrive\bin\Debug\net8.0-windows\XYoptDrive.dll
+C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\XYoptDrive\bin\Debug\net8.0-windows\XYoptDrive.pdb
+C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\XYoptDrive\obj\Debug\net8.0-windows\MainWindow.baml
+C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\XYoptDrive\obj\Debug\net8.0-windows\MainWindow.g.cs
+C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\XYoptDrive\obj\Debug\net8.0-windows\App.g.cs
+C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\XYoptDrive\obj\Debug\net8.0-windows\XYoptDrive_MarkupCompile.cache
+C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\XYoptDrive\obj\Debug\net8.0-windows\XYoptDrive.g.resources
+C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\XYoptDrive\obj\Debug\net8.0-windows\XYoptDrive.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\XYoptDrive\obj\Debug\net8.0-windows\XYoptDrive.AssemblyInfoInputs.cache
+C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\XYoptDrive\obj\Debug\net8.0-windows\XYoptDrive.AssemblyInfo.cs
+C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\XYoptDrive\obj\Debug\net8.0-windows\XYoptDrive.csproj.CoreCompileInputs.cache
+C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\XYoptDrive\obj\Debug\net8.0-windows\XYoptDrive.sourcelink.json
+C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\XYoptDrive\obj\Debug\net8.0-windows\XYoptDrive.dll
+C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\XYoptDrive\obj\Debug\net8.0-windows\refint\XYoptDrive.dll
+C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\XYoptDrive\obj\Debug\net8.0-windows\XYoptDrive.pdb
+C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\XYoptDrive\obj\Debug\net8.0-windows\XYoptDrive.genruntimeconfig.cache
+C:\Users\WhiteShay_TUF\OneDrive\Bureau\Etudes\INSA GE copy\GE5_25\PFE\QNS\Project XY stage\2-Software\XY Optical Drive\PC app\XYoptDrive\obj\Debug\net8.0-windows\ref\XYoptDrive.dll
