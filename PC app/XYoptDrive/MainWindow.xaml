@@ -4,17 +4,43 @@
         Title="XY Optical Drive — Device Manager"
         Height="720" Width="860"
         MinHeight="550" MinWidth="650"
-        WindowStartupLocation="CenterScreen">
+        WindowStartupLocation="CenterScreen"
+        Background="#1e1e1e" Foreground="#e0e0e0">
 
     <Window.Resources>
         <Style TargetType="Button" x:Key="ActionButton">
             <Setter Property="Padding" Value="12,6"/>
             <Setter Property="Margin" Value="0,0,6,0"/>
             <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Background" Value="#2d2d2d"/>
+            <Setter Property="Foreground" Value="#e0e0e0"/>
+            <Setter Property="BorderBrush" Value="#404040"/>
+            <Setter Property="BorderThickness" Value="1"/>
         </Style>
         <Style TargetType="TextBox">
             <Setter Property="Padding" Value="4,3"/>
             <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Background" Value="#2d2d2d"/>
+            <Setter Property="Foreground" Value="#e0e0e0"/>
+            <Setter Property="BorderBrush" Value="#404040"/>
+            <Setter Property="CaretBrush" Value="#e0e0e0"/>
+        </Style>
+        <Style TargetType="DataGrid">
+            <Setter Property="Background" Value="#252525"/>
+            <Setter Property="Foreground" Value="#e0e0e0"/>
+            <Setter Property="BorderBrush" Value="#404040"/>
+        </Style>
+        <Style TargetType="DataGridColumnHeader">
+            <Setter Property="Background" Value="#2d2d2d"/>
+            <Setter Property="Foreground" Value="#e0e0e0"/>
+            <Setter Property="BorderBrush" Value="#404040"/>
+        </Style>
+        <Style TargetType="GroupBox">
+            <Setter Property="Foreground" Value="#e0e0e0"/>
+            <Setter Property="BorderBrush" Value="#404040"/>
+        </Style>
+        <Style TargetType="Separator">
+            <Setter Property="Background" Value="#404040"/>
         </Style>
     </Window.Resources>
 
@@ -38,7 +64,7 @@
                   AutoGenerateColumns="False" IsReadOnly="True"
                   SelectionMode="Single" CanUserAddRows="False"
                   HeadersVisibility="Column" GridLinesVisibility="Horizontal"
-                  AlternatingRowBackground="#F7F7F7"
+                  AlternatingRowBackground="#2a2a2a"
                   Margin="0,0,0,8"
                   MouseDoubleClick="DeviceGrid_MouseDoubleClick">
             <DataGrid.Columns>
@@ -110,9 +136,10 @@
 
             <ProgressBar Grid.Row="1" x:Name="ScanProgress" Height="18"
                          Minimum="0" Maximum="100" Margin="0,0,0,8"
-                         Visibility="Collapsed"/>
+                         Visibility="Collapsed" Background="#2d2d2d" Foreground="#4CAF50"/>
 
-            <ListBox Grid.Row="2" x:Name="ScanResultsList" Margin="0,0,0,4">
+            <ListBox Grid.Row="2" x:Name="ScanResultsList" Margin="0,0,0,4"
+                     Background="#252525" Foreground="#e0e0e0" BorderBrush="#404040">
                 <ListBox.ItemTemplate>
                     <DataTemplate>
                         <StackPanel Orientation="Horizontal">
