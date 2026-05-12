@@ -66,8 +66,59 @@ bool sdReady = false; // Set to true after successful SD.begin() during setup
 
 // ================= MOTOR CONTROL PINS =================
 // Pin 4 is reserved as SD card CS on the Ethernet Shield — do not use it here.
-const uint8_t PIN_MOTOR_CW  = 2;  // DO: Clockwise direction output
-const uint8_t PIN_MOTOR_CCW = 5;  // DO: Counter-clockwise direction output
+const uint8_t PIN_MOTOR_CW  = 2;  // DO: Clockwise direction output / test LED CW
+const uint8_t PIN_MOTOR_CCW = 5;  // DO: Counter-clockwise direction output / test LED CCW
+
+// ================= MODBUS MOTOR CONFIGURATION =================
+// Arduino Uno hardware Serial pins are used for Modbus RTU:
+// RX = pin 0, TX = pin 1. Do not use Serial.print() while the motor drive is connected.
+static const uint32_t MODBUS_BAUD = 9600;
+static const uint8_t MOTOR_SLAVE_ID = 1;
+
+ModbusMaster motor;
+
+// Register map from the motor drive manual
+static const uint16_t REG_RS485_ENABLE = 0x000F;  // Pr0.07: 1 = control by RS485
+static const uint16_t REG_DIRECTION    = 0x0007;  // 0 = CW, 1 = CCW
+static const uint16_t REG_JOG_SPEED    = 0x01E1;  // Pr6.00: JOG velocity
+static const uint16_t REG_JOG_ACCEL    = 0x01E7;  // Pr6.03: JOG acceleration/deceleration time
+static const uint16_t REG_CONTROL_WORD = 0x1801;  // JOG command/control word
+static const uint16_t REG_QUICK_STOP   = 0x6002;  // JOG quick stop register
+
+// Values to write
+static const uint16_t RS485_ENABLE_VALUE = 0x0001;
+static const uint16_t DIR_CW             = 0x0000;
+static const uint16_t DIR_CCW            = 0x0001;
+static const uint16_t JOG_SPEED_RPM      = 60;
+static const uint16_t JOG_ACCEL_VALUE    = 50;     // Adjust to the unit used by the drive manual
+static const uint16_t JOG_CW_CMD         = 0x4001;
+static const uint16_t JOG_CCW_CMD        = 0x4002;
+static const uint16_t STOP_CMD           = 0x0004;
+static const uint16_t QUICK_STOP_CMD     = 0x0040;
+
+// The drive manual says the JOG trigger interval must be less than 50 ms.
+// 20 ms gives margin while still being light enough for the Uno.
+static const uint32_t JOG_REFRESH_MS = 20;
+
+enum MotorState {
+  MOTOR_STOPPED,
+  MOTOR_CW,
+  MOTOR_CCW
+};
+
+MotorState motorState = MOTOR_STOPPED;
+uint32_t lastJogRefresh = 0;
+uint8_t lastModbusResult = 0;
+
+// Null output target used to keep Serial dedicated to Modbus RTU.
+// The existing hardware-check functions can still fill their status structs
+// without writing debug text onto Serial pins 0/1.
+class NullPrint : public Print {
+public:
+  size_t write(uint8_t) override { return 1; }
+};
+
+NullPrint nullOut;
 
 // ================= HELPER STRUCTURES =================
 // Status result structures (small, minimal RAM) for logging to SD file
@@ -102,6 +153,15 @@ void handleClient(EthernetClient client);
 void sendStatusResponse(EthernetClient client);
 void sendHWStatusResponse(EthernetClient client);
 void sendHTMLPage(EthernetClient client);
+
+bool writeMotorRegister(uint16_t reg, uint16_t value);
+void setupMotorDrive();
+void startMotorCW();
+void startMotorCCW();
+void stopMotor();
+void serviceMotorJog();
+const __FlashStringHelper* motorStateText();
+void sendMotorActionResponse(EthernetClient client, const __FlashStringHelper* message);
 
 EthernetStatus checkEthernetStatus(Print &out) {
   EthernetStatus status = {};
@@ -310,13 +370,10 @@ void writeHardwareStatusToFile(File &file, const EthernetStatus &eth, const SDCa
 }
 
 void createtxt(const EthernetStatus &eth, const SDCardStatus &sd) {
-  Serial.println(F("\n--- SD Card Create .txt Test ---"));
-
   ActiveSD();
 
   // Ensure SD is initialized (assumes CS already set correctly)
   if (!SD.begin(4)) {
-    Serial.println(F("Cannot create file - SD not initialized"));
     return;
   }
 
@@ -325,7 +382,6 @@ void createtxt(const EthernetStatus &eth, const SDCardStatus &sd) {
 
   File file = SD.open("test.txt", FILE_WRITE);
   if (!file) {
-    Serial.println(F("Failed to open test.txt for writing"));
     return;
   }
 
@@ -340,56 +396,157 @@ void createtxt(const EthernetStatus &eth, const SDCardStatus &sd) {
   file.close();
   activeEthernet();
 
-  Serial.println(F("test.txt created/updated successfully"));
 }
 
 void verifyAndClearTxtFile() {
-  Serial.println(F("\n--- Verifying SD Card .txt File ---"));
 
   ActiveSD();
 
   // Ensure SD is initialized
   if (!SD.begin(4)) {
-    Serial.println(F("Cannot verify file - SD not initialized"));
     return;
   }
 
   // Check if the file exists
   if (!SD.exists("test.txt")) {
-    Serial.println(F("test.txt does not exist"));
     return;
   }
 
-  Serial.println(F("test.txt exists"));
 
   // Open the file to check if it's empty
   File file = SD.open("test.txt", FILE_READ);
   if (!file) {
-    Serial.println(F("Failed to open test.txt for reading"));
     return;
   }
 
   // Check if the file is empty
   if (file.size() == 0) {
-    Serial.println(F("test.txt is empty"));
     file.close();
     return;
   }
 
-  Serial.println(F("test.txt is not empty, clearing content..."));
   file.close();
 
   // Open the file in write mode to clear it (this truncates the file)
   file = SD.open("test.txt", FILE_WRITE);
   if (!file) {
-    Serial.println(F("Failed to open test.txt for clearing"));
     return;
   }
 
   // Since we opened in FILE_WRITE without writing anything, the file is now empty
   file.close();
 
-  Serial.println(F("test.txt content cleared successfully"));
+}
+
+
+// ================= MODBUS MOTOR FUNCTIONS =================
+bool writeMotorRegister(uint16_t reg, uint16_t value) {
+  uint8_t result = motor.writeSingleRegister(reg, value);
+  lastModbusResult = result;
+  return result == motor.ku8MBSuccess;
+}
+
+void setupMotorDrive() {
+  // Enable drive control by RS485, then preload the JOG parameters.
+  writeMotorRegister(REG_RS485_ENABLE, RS485_ENABLE_VALUE);
+  delay(5);
+  writeMotorRegister(REG_JOG_SPEED, JOG_SPEED_RPM);
+  delay(5);
+  writeMotorRegister(REG_JOG_ACCEL, JOG_ACCEL_VALUE);
+  delay(5);
+
+  stopMotor();
+}
+
+void startMotorCW() {
+  // Configure direction and speed first. The continuous JOG command is sent by serviceMotorJog().
+  writeMotorRegister(REG_RS485_ENABLE, RS485_ENABLE_VALUE);
+  delay(5);
+  writeMotorRegister(REG_DIRECTION, DIR_CW);
+  delay(5);
+  writeMotorRegister(REG_JOG_SPEED, JOG_SPEED_RPM);
+  delay(5);
+
+  motorState = MOTOR_CW;
+  lastJogRefresh = 0;
+
+  digitalWrite(PIN_MOTOR_CW, HIGH);
+  digitalWrite(PIN_MOTOR_CCW, LOW);
+}
+
+void startMotorCCW() {
+  // Configure direction and speed first. The continuous JOG command is sent by serviceMotorJog().
+  writeMotorRegister(REG_RS485_ENABLE, RS485_ENABLE_VALUE);
+  delay(5);
+  writeMotorRegister(REG_DIRECTION, DIR_CCW);
+  delay(5);
+  writeMotorRegister(REG_JOG_SPEED, JOG_SPEED_RPM);
+  delay(5);
+
+  motorState = MOTOR_CCW;
+  lastJogRefresh = 0;
+
+  digitalWrite(PIN_MOTOR_CW, LOW);
+  digitalWrite(PIN_MOTOR_CCW, HIGH);
+}
+
+void stopMotor() {
+  motorState = MOTOR_STOPPED;
+
+  // Requested STOP command on the control word.
+  writeMotorRegister(REG_CONTROL_WORD, STOP_CMD);
+  delay(5);
+
+  // Manual quick-stop command. Comment this line out if your drive only expects 0x1801 = 0x0004.
+  writeMotorRegister(REG_QUICK_STOP, QUICK_STOP_CMD);
+
+  digitalWrite(PIN_MOTOR_CW, LOW);
+  digitalWrite(PIN_MOTOR_CCW, LOW);
+}
+
+void serviceMotorJog() {
+  if (motorState == MOTOR_STOPPED) {
+    return;
+  }
+
+  uint32_t now = millis();
+  if (now - lastJogRefresh < JOG_REFRESH_MS) {
+    return;
+  }
+
+  lastJogRefresh = now;
+
+  if (motorState == MOTOR_CW) {
+    writeMotorRegister(REG_CONTROL_WORD, JOG_CW_CMD);
+  } else if (motorState == MOTOR_CCW) {
+    writeMotorRegister(REG_CONTROL_WORD, JOG_CCW_CMD);
+  }
+}
+
+const __FlashStringHelper* motorStateText() {
+  switch (motorState) {
+    case MOTOR_CW: return F("cw");
+    case MOTOR_CCW: return F("ccw");
+    default: return F("stopped");
+  }
+}
+
+void sendMotorActionResponse(EthernetClient client, const __FlashStringHelper* message) {
+  client.println(F("HTTP/1.1 200 OK"));
+  client.println(F("Content-Type: application/json"));
+  client.println(F("Connection: close"));
+  client.println();
+  client.print(F("{\"ok\":true,\"message\":\""));
+  client.print(message);
+  client.print(F("\",\"motor_state\":\""));
+  client.print(motorStateText());
+  client.print(F("\",\"jog_speed_rpm\":"));
+  client.print(JOG_SPEED_RPM);
+  client.print(F(",\"jog_refresh_ms\":"));
+  client.print(JOG_REFRESH_MS);
+  client.print(F(",\"last_modbus_result\":"));
+  client.print(lastModbusResult);
+  client.println(F("}"));
 }
 
 // ================= WEB SERVER FUNCTIONS =================
@@ -406,20 +563,14 @@ void handleClient(EthernetClient client) {
   if (strstr(request, "GET /status ")) {
     sendStatusResponse(client);
   } else if (strstr(request, "GET /cw ")) {
-    digitalWrite(PIN_MOTOR_CW, HIGH);
-    digitalWrite(PIN_MOTOR_CCW, LOW);
-    client.println(F("HTTP/1.1 200 OK"));
-    client.println();
+    startMotorCW();
+    sendMotorActionResponse(client, F("CW JOG started"));
   } else if (strstr(request, "GET /ccw ")) {
-    digitalWrite(PIN_MOTOR_CCW, HIGH);
-    digitalWrite(PIN_MOTOR_CW, LOW);
-    client.println(F("HTTP/1.1 200 OK"));
-    client.println();
+    startMotorCCW();
+    sendMotorActionResponse(client, F("CCW JOG started"));
   } else if (strstr(request, "GET /stop ")) {
-    digitalWrite(PIN_MOTOR_CW, LOW);
-    digitalWrite(PIN_MOTOR_CCW, LOW);
-    client.println(F("HTTP/1.1 200 OK"));
-    client.println();
+    stopMotor();
+    sendMotorActionResponse(client, F("Motor stopped"));
   } else if (strstr(request, "GET /hwstatus ")) {
     sendHWStatusResponse(client);
   } else if (strstr(request, "GET / ")) {
@@ -434,9 +585,18 @@ void handleClient(EthernetClient client) {
 void sendStatusResponse(EthernetClient client) {
   client.println(F("HTTP/1.1 200 OK"));
   client.println(F("Content-Type: application/json"));
+  client.println(F("Connection: close"));
   client.println();
   client.print(F("{\"uptime\":"));
   client.print(millis());
+  client.print(F(",\"motor_state\":\""));
+  client.print(motorStateText());
+  client.print(F("\",\"jog_speed_rpm\":"));
+  client.print(JOG_SPEED_RPM);
+  client.print(F(",\"jog_refresh_ms\":"));
+  client.print(JOG_REFRESH_MS);
+  client.print(F(",\"last_modbus_result\":"));
+  client.print(lastModbusResult);
   client.println(F("}"));
 }
 
@@ -468,6 +628,7 @@ void sendHWStatusResponse(EthernetClient client) {
     int n = txt.read(buf, sizeof(buf));
     activeEthernet();
     if (n > 0) client.write(buf, n);
+    serviceMotorJog();
   }
   ActiveSD();
   txt.close();
@@ -508,6 +669,7 @@ void sendHTMLPage(EthernetClient client) {
     int n = html.read(buf, sizeof(buf));
     activeEthernet();
     if (n > 0) client.write(buf, n);
+    serviceMotorJog();
   }
   ActiveSD();
   html.close();
@@ -529,19 +691,18 @@ void setup() {
   pinMode(PIN_MOTOR_CCW, OUTPUT);
   digitalWrite(PIN_MOTOR_CCW, LOW);
 
-    Serial.begin(9600);
-  while (!Serial) {
-    ; // wait for serial port to connect
-  }
+  // Hardware Serial is now the Modbus RTU port to the motor drive.
+  // Keep Serial pins 0/1 free from debug text once the drive is connected.
+  Serial.begin(MODBUS_BAUD);
+  motor.begin(MOTOR_SLAVE_ID, Serial);
 
-  Serial.println(F("Arduino Status Check Starting..."));
-  delay(500); // Delay to let Hardware power up before check
+  delay(500); // Delay to let hardware power up before checks
 
   // Check SPI pin status (10-13) ==> test function to verify SPI communication and pin configuration before checking Ethernet and SD card status
   // printSPIPinStatus();
 
   // Check Ethernet shield status (prints to Serial)
-  EthernetStatus ethStatus = checkEthernetStatus(Serial);
+  EthernetStatus ethStatus = checkEthernetStatus(nullOut);
 
   // Start web server only after Ethernet is initialized
   server.begin();
@@ -550,19 +711,21 @@ void setup() {
   //printSPIPinStatus();
 
   // Check SD card status (prints to Serial)
-  SDCardStatus sdStatus = checkSDCardStatus(Serial);
+  SDCardStatus sdStatus = checkSDCardStatus(nullOut);
 
   // Write the same status output to the SD card file
   createtxt(ethStatus, sdStatus);
 
-  Serial.println(F("Status check complete."));
+  setupMotorDrive();
 }
 
 void loop() {
-  // Handle web clients first
+  // Handle web clients. The motor JOG service still runs every loop pass.
   EthernetClient client = server.available();
   if (client) {
     handleClient(client);
-    return;
   }
+
+  // Critical: refresh 0x4001/0x4002 faster than 50 ms while moving.
+  serviceMotorJog();
 }
