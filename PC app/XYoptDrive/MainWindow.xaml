@@ -16,6 +16,40 @@
             <Setter Property="Foreground" Value="#e0e0e0"/>
             <Setter Property="BorderBrush" Value="#404040"/>
             <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="ButtonBorder"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="4"
+                                SnapsToDevicePixels="True">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              RecognizesAccessKey="True"
+                                              Margin="{TemplateBinding Padding}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ButtonBorder" Property="Background" Value="#179289"/>
+                                <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="#179289"/>
+                                <Setter Property="Foreground" Value="#ffffff"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="ButtonBorder" Property="Background" Value="#10645E"/>
+                                <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="#10645E"/>
+                                <Setter Property="Foreground" Value="#ffffff"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="ButtonBorder" Property="Background" Value="#1f1f1f"/>
+                                <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="#2f2f2f"/>
+                                <Setter Property="Foreground" Value="#808080"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
         <Style TargetType="TextBox">
             <Setter Property="Padding" Value="4,3"/>
@@ -34,6 +68,22 @@
             <Setter Property="Background" Value="#2d2d2d"/>
             <Setter Property="Foreground" Value="#e0e0e0"/>
             <Setter Property="BorderBrush" Value="#404040"/>
+        </Style>
+        <Style TargetType="DataGridRow">
+            <Setter Property="Background" Value="#252525"/>
+            <Setter Property="Foreground" Value="#e0e0e0"/>
+            <Setter Property="BorderBrush" Value="#404040"/>
+            <Setter Property="BorderThickness" Value="0,0,0,1"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#179289"/>
+                    <Setter Property="Foreground" Value="#ffffff"/>
+                </Trigger>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="#10645E"/>
+                    <Setter Property="Foreground" Value="#ffffff"/>
+                </Trigger>
+            </Style.Triggers>
         </Style>
         <Style TargetType="GroupBox">
             <Setter Property="Foreground" Value="#e0e0e0"/>
@@ -136,7 +186,7 @@
 
             <ProgressBar Grid.Row="1" x:Name="ScanProgress" Height="18"
                          Minimum="0" Maximum="100" Margin="0,0,0,8"
-                         Visibility="Collapsed" Background="#2d2d2d" Foreground="#4CAF50"/>
+                         Visibility="Collapsed" Background="#2d2d2d" Foreground="#179289"/>
 
             <ListBox Grid.Row="2" x:Name="ScanResultsList" Margin="0,0,0,4"
                      Background="#252525" Foreground="#e0e0e0" BorderBrush="#404040">

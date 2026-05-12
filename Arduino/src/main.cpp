@@ -484,7 +484,7 @@ void sendHTMLPage(EthernetClient client) {
     client.println(F("Content-Type: text/html"));
     client.println(F("Connection: close"));
     client.println();
-    client.println(F("<html><body>SD not available</body></html>"));
+    client.println(F("<html><body style='margin:0; padding:16px; background:#1e1e1e; color:#e0e0e0; font-family:Arial,sans-serif;'><h2>SD not available</h2><p>The web page could not be loaded because the SD card is not ready.</p></body></html>"));
     return;
   }
   File html = SD.open("index.htm", FILE_READ);
@@ -494,7 +494,7 @@ void sendHTMLPage(EthernetClient client) {
     client.println(F("Content-Type: text/html"));
     client.println(F("Connection: close"));
     client.println();
-    client.println(F("<html><body>index.htm not found on SD card</body></html>"));
+    client.println(F("<html><body style='margin:0; padding:16px; background:#1e1e1e; color:#e0e0e0; font-family:Arial,sans-serif;'><h2>index.htm not found on SD card</h2><p>Place the web page on the SD card to enable the dark-mode interface.</p></body></html>"));
     return;
   }
   client.println(F("HTTP/1.1 200 OK"));
