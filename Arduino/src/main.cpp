@@ -28,12 +28,12 @@
  * *  - Full app architecture OK (PC - Arduino Web Server) - DONE -
  * *  - Functional IP adress sweep for Arduino discovery. - IN PROGRESS --> up to V1.0.0
  * * 13/04/2026 ==> 20/04/2026 - V1.0.1->V1.0.3 - First test Modbus motor control.
- * * *  - Test Modbus communication with motor drivers. - IN PROGRESS
- * *  - V1.0.2: Homing + 0 definition - TO DO
- * *  - V1.0.3: Move CW/CCW + position increment - TO DO
+ * * *  - Test Modbus communication with motor drivers. - DONE (11/05)
+ * *  - V1.0.2: Homing + 0 definition - IN PROGRESS (12/05)
+ * *  - V1.0.3: Move CW/CCW + position increment - IN PROGRESS (12/05)
  * 27/04/2026 ==> 15/05/2026 - V1.0.3->V1.0.7 - Finalize motor control and testing
  * *  - V1.0.3: Speed switch. - TO DO
- * *  - V1.0.4: Emergency Stop. - TO DO
+ * *  - V1.0.4: Emergency Stop. - DONE (11/05)
  * *  - V1.0.5: Save position - TO DO
  * *  - V1.0.6: Go to position mode - TO DO
  * 
@@ -44,7 +44,15 @@
 #include <Ethernet.h>
 #include <SD.h>
 #include <ModbusMaster.h>
-#include <EEPROM.h>
+#include <SoftwareSerial.h>
+
+#ifndef FEATURE_SD_LOGGING
+#define FEATURE_SD_LOGGING 1
+#endif
+
+#ifndef FEATURE_MOTORTEST_ENDPOINT
+#define FEATURE_MOTORTEST_ENDPOINT 1
+#endif
 
 // ================= NETWORK CONFIGURATION =================
 //                    MAC Address: 
@@ -66,15 +74,19 @@ bool sdReady = false; // Set to true after successful SD.begin() during setup
 
 // ================= MOTOR CONTROL PINS =================
 // Pin 4 is reserved as SD card CS on the Ethernet Shield — do not use it here.
-const uint8_t PIN_MOTOR_CW  = 2;  // DO: Clockwise direction output / test LED CW
-const uint8_t PIN_MOTOR_CCW = 5;  // DO: Counter-clockwise direction output / test LED CCW
+const uint8_t PIN_LED_motCW  = 2;  // DO: Clockwise direction output / test LED CW
+const uint8_t PIN_LED_motCCW = 5;  // DO: Counter-clockwise direction output / test LED CCW
 
 // ================= MODBUS MOTOR CONFIGURATION =================
-// Arduino Uno hardware Serial pins are used for Modbus RTU:
-// RX = pin 0, TX = pin 1. Do not use Serial.print() while the motor drive is connected.
+// Modbus RTU runs on SoftwareSerial to keep hardware Serial free for PC debug.
+// D8 = RX (from RS485 adapter TX), D9 = TX (to RS485 adapter RX).
+static const uint32_t PC_BAUD = 115200;
 static const uint32_t MODBUS_BAUD = 9600;
 static const uint8_t MOTOR_SLAVE_ID = 1;
+static const uint8_t MODBUS_RX_PIN = 8;
+static const uint8_t MODBUS_TX_PIN = 9;
 
+SoftwareSerial modbusSerial(MODBUS_RX_PIN, MODBUS_TX_PIN);
 ModbusMaster motor;
 
 // Register map from the motor drive manual
@@ -110,16 +122,6 @@ MotorState motorState = MOTOR_STOPPED;
 uint32_t lastJogRefresh = 0;
 uint8_t lastModbusResult = 0;
 
-// Null output target used to keep Serial dedicated to Modbus RTU.
-// The existing hardware-check functions can still fill their status structs
-// without writing debug text onto Serial pins 0/1.
-class NullPrint : public Print {
-public:
-  size_t write(uint8_t) override { return 1; }
-};
-
-NullPrint nullOut;
-
 // ================= HELPER STRUCTURES =================
 // Status result structures (small, minimal RAM) for logging to SD file
 struct EthernetStatus {
@@ -149,10 +151,14 @@ void activeEthernet(); // Activate Ethernet on SPI bus (de-select SD, select Eth
 
 void printIPAddress(Print &out, const IPAddress &address);
 
+bool readHttpLine(EthernetClient &client, char *buffer, size_t bufferSize, uint16_t timeoutMs);
+bool parseRequestLine(const char *line, char *method, size_t methodSize, char *path, size_t pathSize, bool &http11);
+void sendHttpCommonHeaders(EthernetClient &client, const __FlashStringHelper *contentType, bool keepAlive);
+
 void handleClient(EthernetClient client);
-void sendStatusResponse(EthernetClient client);
-void sendHWStatusResponse(EthernetClient client);
-void sendHTMLPage(EthernetClient client);
+void sendStatusResponse(EthernetClient client, bool keepAlive);
+void sendHWStatusResponse(EthernetClient client, bool keepAlive);
+void sendHTMLPage(EthernetClient client, bool keepAlive);
 
 bool writeMotorRegister(uint16_t reg, uint16_t value);
 void setupMotorDrive();
@@ -161,7 +167,15 @@ void startMotorCCW();
 void stopMotor();
 void serviceMotorJog();
 const __FlashStringHelper* motorStateText();
-void sendMotorActionResponse(EthernetClient client, const __FlashStringHelper* message);
+void sendMotorActionResponse(EthernetClient client, const char *message, bool keepAlive);
+
+static const uint16_t HTTP_READ_TIMEOUT_MS = 250;
+static const uint16_t HTTP_KEEPALIVE_IDLE_MS = 75;
+static const uint8_t HTTP_MAX_REQUESTS_PER_CONNECTION = 4;
+static const uint8_t HTTP_REQUEST_LINE_BUFFER_SIZE = 64;
+static const uint8_t HTTP_HEADER_LINE_BUFFER_SIZE = 64;
+static const uint8_t HTTP_METHOD_BUFFER_SIZE = 8;
+static const uint8_t HTTP_PATH_BUFFER_SIZE = 20;
 
 EthernetStatus checkEthernetStatus(Print &out) {
   EthernetStatus status = {};
@@ -302,6 +316,83 @@ void printIPAddress(Print &out, const IPAddress &address) {
       out.print(F("."));
     }
   }
+}
+
+bool readHttpLine(EthernetClient &client, char *buffer, size_t bufferSize, uint16_t timeoutMs) {
+  if (bufferSize == 0) {
+    return false;
+  }
+
+  size_t index = 0;
+  uint32_t start = millis();
+
+  while ((millis() - start) < timeoutMs) {
+    serviceMotorJog();
+    while (client.available()) {
+      char c = client.read();
+      if (c == '\r') {
+        continue;
+      }
+      if (c == '\n') {
+        buffer[index] = '\0';
+        return true;
+      }
+      if (index < bufferSize - 1) {
+        buffer[index++] = c;
+      }
+      start = millis();
+    }
+
+    if (!client.connected()) {
+      break;
+    }
+  }
+
+  buffer[index] = '\0';
+  return index > 0;
+}
+
+bool parseRequestLine(const char *line, char *method, size_t methodSize, char *path, size_t pathSize, bool &http11) {
+  method[0] = '\0';
+  path[0] = '\0';
+  http11 = false;
+
+  const char *firstSpace = strchr(line, ' ');
+  if (!firstSpace) {
+    return false;
+  }
+  const char *secondSpace = strchr(firstSpace + 1, ' ');
+  if (!secondSpace) {
+    return false;
+  }
+
+  size_t methodLen = firstSpace - line;
+  size_t pathLen = secondSpace - (firstSpace + 1);
+  if (methodLen == 0 || pathLen == 0 || methodLen >= methodSize || pathLen >= pathSize) {
+    return false;
+  }
+
+  memcpy(method, line, methodLen);
+  method[methodLen] = '\0';
+  memcpy(path, firstSpace + 1, pathLen);
+  path[pathLen] = '\0';
+
+  http11 = (strstr(secondSpace + 1, "HTTP/1.1") != NULL);
+  return true;
+}
+
+void sendHttpCommonHeaders(EthernetClient &client, const __FlashStringHelper *contentType, bool keepAlive) {
+  client.println(F("HTTP/1.1 200 OK"));
+  client.print(F("Content-Type: "));
+  client.println(contentType);
+  client.println(keepAlive ? F("Connection: keep-alive") : F("Connection: close"));
+  if (keepAlive) {
+    client.print(F("Keep-Alive: timeout="));
+    client.print((HTTP_KEEPALIVE_IDLE_MS + 999) / 1000);
+    client.print(F(", max="));
+    client.println(HTTP_MAX_REQUESTS_PER_CONNECTION);
+  }
+  client.println();
 }
 
 void writeHardwareStatusToFile(File &file, const EthernetStatus &eth, const SDCardStatus &sd) {
@@ -470,8 +561,8 @@ void startMotorCW() {
   motorState = MOTOR_CW;
   lastJogRefresh = 0;
 
-  digitalWrite(PIN_MOTOR_CW, HIGH);
-  digitalWrite(PIN_MOTOR_CCW, LOW);
+  digitalWrite(PIN_LED_motCW, HIGH);
+  digitalWrite(PIN_LED_motCCW, LOW);
 }
 
 void startMotorCCW() {
@@ -486,8 +577,8 @@ void startMotorCCW() {
   motorState = MOTOR_CCW;
   lastJogRefresh = 0;
 
-  digitalWrite(PIN_MOTOR_CW, LOW);
-  digitalWrite(PIN_MOTOR_CCW, HIGH);
+  digitalWrite(PIN_LED_motCW, LOW);
+  digitalWrite(PIN_LED_motCCW, HIGH);
 }
 
 void stopMotor() {
@@ -500,8 +591,8 @@ void stopMotor() {
   // Manual quick-stop command. Comment this line out if your drive only expects 0x1801 = 0x0004.
   writeMotorRegister(REG_QUICK_STOP, QUICK_STOP_CMD);
 
-  digitalWrite(PIN_MOTOR_CW, LOW);
-  digitalWrite(PIN_MOTOR_CCW, LOW);
+  digitalWrite(PIN_LED_motCW, LOW);
+  digitalWrite(PIN_LED_motCCW, LOW);
 }
 
 void serviceMotorJog() {
@@ -531,11 +622,8 @@ const __FlashStringHelper* motorStateText() {
   }
 }
 
-void sendMotorActionResponse(EthernetClient client, const __FlashStringHelper* message) {
-  client.println(F("HTTP/1.1 200 OK"));
-  client.println(F("Content-Type: application/json"));
-  client.println(F("Connection: close"));
-  client.println();
+void sendMotorActionResponse(EthernetClient client, const char *message, bool keepAlive) {
+  sendHttpCommonHeaders(client, F("application/json"), keepAlive);
   client.print(F("{\"ok\":true,\"message\":\""));
   client.print(message);
   client.print(F("\",\"motor_state\":\""));
@@ -546,47 +634,156 @@ void sendMotorActionResponse(EthernetClient client, const __FlashStringHelper* m
   client.print(JOG_REFRESH_MS);
   client.print(F(",\"last_modbus_result\":"));
   client.print(lastModbusResult);
-  client.println(F("}"));
+  client.print(F("}"));
+  client.println();
 }
+
+// ================= MOTOR TEST SEQUENCE =================
+// Complete motor test sequence: power on delay, forward jog, stop, reverse jog, stop.
+// This function blocks until the entire sequence completes (~25 seconds total).
+#if FEATURE_MOTORTEST_ENDPOINT
+void motorTestSequence() {
+  // Phase 1: Power-on delay (20 seconds)
+  unsigned long phaseStart = millis();
+  while (millis() - phaseStart < 20000) {
+    serviceMotorJog();
+    delay(1);
+  }
+
+  // Phase 2: Set speed and enable drive
+  setupMotorDrive();
+  delay(300);
+
+  // Phase 3: Forward jog for 3 seconds
+  startMotorCW();
+  phaseStart = millis();
+  while (millis() - phaseStart < 3000) {
+    serviceMotorJog();
+    delay(1);
+  }
+
+  // Phase 4: Quick stop pause for 2 seconds
+  stopMotor();
+  phaseStart = millis();
+  while (millis() - phaseStart < 2000) {
+    serviceMotorJog();
+    delay(1);
+  }
+
+  // Phase 5: Reverse jog for 3 seconds
+  startMotorCCW();
+  phaseStart = millis();
+  while (millis() - phaseStart < 3000) {
+    serviceMotorJog();
+    delay(1);
+  }
+
+  // Phase 6: Final stop
+  stopMotor();
+}
+#endif
 
 // ================= WEB SERVER FUNCTIONS =================
 void handleClient(EthernetClient client) {
-  char request[48] = {0}; // Fixed buffer for HTTP request line
-  size_t index = 0;
-  while (client.available() && index < sizeof(request) - 1) {
-    char c = client.read();
-    request[index++] = c;
-    if (c == '\n') break;
-  }
-  request[index] = '\0'; // Null terminate
+  uint8_t requestsServed = 0;
 
-  if (strstr(request, "GET /status ")) {
-    sendStatusResponse(client);
-  } else if (strstr(request, "GET /cw ")) {
-    startMotorCW();
-    sendMotorActionResponse(client, F("CW JOG started"));
-  } else if (strstr(request, "GET /ccw ")) {
-    startMotorCCW();
-    sendMotorActionResponse(client, F("CCW JOG started"));
-  } else if (strstr(request, "GET /stop ")) {
-    stopMotor();
-    sendMotorActionResponse(client, F("Motor stopped"));
-  } else if (strstr(request, "GET /hwstatus ")) {
-    sendHWStatusResponse(client);
-  } else if (strstr(request, "GET / ")) {
-    sendHTMLPage(client);
-  } else {
-    client.println(F("HTTP/1.1 404 Not Found"));
-    client.println();
+  while (client.connected() && requestsServed < HTTP_MAX_REQUESTS_PER_CONNECTION) {
+    char requestLine[HTTP_REQUEST_LINE_BUFFER_SIZE] = {0};
+    if (!readHttpLine(client, requestLine, sizeof(requestLine), HTTP_KEEPALIVE_IDLE_MS)) {
+      break;
+    }
+
+    if (requestLine[0] == '\0') {
+      continue;
+    }
+
+    char method[HTTP_METHOD_BUFFER_SIZE] = {0};
+    char path[HTTP_PATH_BUFFER_SIZE] = {0};
+    bool http11 = false;
+
+    if (!parseRequestLine(requestLine, method, sizeof(method), path, sizeof(path), http11)) {
+      client.println(F("HTTP/1.1 400 Bad Request"));
+      client.println(F("Connection: close"));
+      client.println();
+      break;
+    }
+
+    bool keepAlive = http11;
+    while (true) {
+      char headerLine[HTTP_HEADER_LINE_BUFFER_SIZE] = {0};
+      bool gotLine = readHttpLine(client, headerLine, sizeof(headerLine), HTTP_READ_TIMEOUT_MS);
+      if (!gotLine) {
+        keepAlive = false;
+        break;
+      }
+      if (headerLine[0] == '\0') {
+        break;
+      }
+      if (strstr(headerLine, "Connection: close") || strstr(headerLine, "Connection: Close")) {
+        keepAlive = false;
+      }
+      if (strstr(headerLine, "Connection: keep-alive") || strstr(headerLine, "Connection: Keep-Alive")) {
+        keepAlive = true;
+      }
+    }
+
+    // Prevent socket starvation and responsiveness drops on Uno: close after each response.
+    keepAlive = false;
+
+    // Redundant with forced close, but kept as a guardrail if keep-alive is re-enabled later.
+    if (requestsServed + 1 >= HTTP_MAX_REQUESTS_PER_CONNECTION) {
+      keepAlive = false;
+    }
+
+    if (strcmp(method, "GET") != 0) {
+      client.println(F("HTTP/1.1 405 Method Not Allowed"));
+      client.println(F("Allow: GET"));
+      client.println(F("Connection: close"));
+      client.println();
+      break;
+    }
+
+    if (strcmp(path, "/status") == 0) {
+      sendStatusResponse(client, keepAlive);
+    } else if (strcmp(path, "/cw") == 0) {
+      startMotorCW();
+      sendMotorActionResponse(client, "CW JOG started", keepAlive);
+    } else if (strcmp(path, "/ccw") == 0) {
+      startMotorCCW();
+      sendMotorActionResponse(client, "CCW JOG started", keepAlive);
+    } else if (strcmp(path, "/stop") == 0) {
+      stopMotor();
+      sendMotorActionResponse(client, "Motor stopped", keepAlive);
+#if FEATURE_MOTORTEST_ENDPOINT
+    } else if (strcmp(path, "/motortest") == 0) {
+      // Motor test sequence endpoint: runs complete test blocking for ~25 seconds
+      keepAlive = false;
+      motorTestSequence();
+      sendMotorActionResponse(client, "Motor test sequence completed", keepAlive);
+#endif
+    } else if (strcmp(path, "/hwstatus") == 0) {
+      keepAlive = false;
+      sendHWStatusResponse(client, keepAlive);
+    } else if (strcmp(path, "/") == 0) {
+      keepAlive = false;
+      sendHTMLPage(client, keepAlive);
+    } else {
+      client.println(F("HTTP/1.1 404 Not Found"));
+      client.println(keepAlive ? F("Connection: keep-alive") : F("Connection: close"));
+      client.println();
+    }
+
+    requestsServed++;
+    if (!keepAlive) {
+      break;
+    }
   }
+
   client.stop();
 }
 
-void sendStatusResponse(EthernetClient client) {
-  client.println(F("HTTP/1.1 200 OK"));
-  client.println(F("Content-Type: application/json"));
-  client.println(F("Connection: close"));
-  client.println();
+void sendStatusResponse(EthernetClient client, bool keepAlive) {
+  sendHttpCommonHeaders(client, F("application/json"), keepAlive);
   client.print(F("{\"uptime\":"));
   client.print(millis());
   client.print(F(",\"motor_state\":\""));
@@ -597,24 +794,22 @@ void sendStatusResponse(EthernetClient client) {
   client.print(JOG_REFRESH_MS);
   client.print(F(",\"last_modbus_result\":"));
   client.print(lastModbusResult);
-  client.println(F("}"));
+  client.print(F("}"));
+  client.println();
 }
 
-void sendHWStatusResponse(EthernetClient client) {
+void sendHWStatusResponse(EthernetClient client, bool keepAlive) {
   ActiveSD();
   if (!sdReady) {
     activeEthernet();
     client.println(F("HTTP/1.1 503 Service Unavailable"));
     client.println(F("Content-Type: text/plain"));
-    client.println(F("Connection: close"));
+    client.println(keepAlive ? F("Connection: keep-alive") : F("Connection: close"));
     client.println();
     client.println(F("SD not available"));
     return;
   }
-  client.println(F("HTTP/1.1 200 OK"));
-  client.println(F("Content-Type: text/plain"));
-  client.println(F("Connection: close"));
-  client.println();
+  sendHttpCommonHeaders(client, F("text/plain"), keepAlive);
   File txt = SD.open("test.txt", FILE_READ);
   if (!txt) {
     activeEthernet();
@@ -637,13 +832,13 @@ void sendHWStatusResponse(EthernetClient client) {
 
 // Serve index.htm from SD card.
 // Copy Web/index.html to the SD card as index.htm (SD library uses 8.3 filenames).
-void sendHTMLPage(EthernetClient client) {
+void sendHTMLPage(EthernetClient client, bool keepAlive) {
   ActiveSD();
   if (!sdReady) {
     activeEthernet();
     client.println(F("HTTP/1.1 503 Service Unavailable"));
     client.println(F("Content-Type: text/html"));
-    client.println(F("Connection: close"));
+    client.println(keepAlive ? F("Connection: keep-alive") : F("Connection: close"));
     client.println();
     client.println(F("<html><body style='margin:0; padding:16px; background:#1e1e1e; color:#e0e0e0; font-family:Arial,sans-serif;'><h2>SD not available</h2><p>The web page could not be loaded because the SD card is not ready.</p></body></html>"));
     return;
@@ -653,15 +848,12 @@ void sendHTMLPage(EthernetClient client) {
     activeEthernet();
     client.println(F("HTTP/1.1 404 Not Found"));
     client.println(F("Content-Type: text/html"));
-    client.println(F("Connection: close"));
+    client.println(keepAlive ? F("Connection: keep-alive") : F("Connection: close"));
     client.println();
     client.println(F("<html><body style='margin:0; padding:16px; background:#1e1e1e; color:#e0e0e0; font-family:Arial,sans-serif;'><h2>index.htm not found on SD card</h2><p>Place the web page on the SD card to enable the dark-mode interface.</p></body></html>"));
     return;
   }
-  client.println(F("HTTP/1.1 200 OK"));
-  client.println(F("Content-Type: text/html"));
-  client.println(F("Connection: close"));
-  client.println();
+  sendHttpCommonHeaders(client, F("text/html"), keepAlive);
   uint8_t buf[32];
   while (true) {
     ActiveSD();
@@ -686,23 +878,23 @@ void setup() {
   digitalWrite(4, HIGH);
 
   // Motor direction outputs — both LOW (stopped) at startup
-  pinMode(PIN_MOTOR_CW, OUTPUT);
-  digitalWrite(PIN_MOTOR_CW, LOW);
-  pinMode(PIN_MOTOR_CCW, OUTPUT);
-  digitalWrite(PIN_MOTOR_CCW, LOW);
+  pinMode(PIN_LED_motCW, OUTPUT);
+  digitalWrite(PIN_LED_motCW, LOW);
+  pinMode(PIN_LED_motCCW, OUTPUT);
+  digitalWrite(PIN_LED_motCCW, LOW);
 
-  // Hardware Serial is now the Modbus RTU port to the motor drive.
-  // Keep Serial pins 0/1 free from debug text once the drive is connected.
-  Serial.begin(MODBUS_BAUD);
-  motor.begin(MOTOR_SLAVE_ID, Serial);
+  // Hardware Serial is reserved for debug on PC.
+  Serial.begin(PC_BAUD);
+  modbusSerial.begin(MODBUS_BAUD);
+  motor.begin(MOTOR_SLAVE_ID, modbusSerial);
 
   delay(500); // Delay to let hardware power up before checks
 
   // Check SPI pin status (10-13) ==> test function to verify SPI communication and pin configuration before checking Ethernet and SD card status
   // printSPIPinStatus();
 
-  // Check Ethernet shield status (prints to Serial)
-  EthernetStatus ethStatus = checkEthernetStatus(nullOut);
+  // Check Ethernet shield status (prints to Serial monitor)
+  EthernetStatus ethStatus = checkEthernetStatus(Serial);
 
   // Start web server only after Ethernet is initialized
   server.begin();
@@ -710,11 +902,16 @@ void setup() {
   // Check SPI pin status (10-13)==> test funct
   //printSPIPinStatus();
 
-  // Check SD card status (prints to Serial)
-  SDCardStatus sdStatus = checkSDCardStatus(nullOut);
+  // Check SD card status (prints to Serial monitor)
+  SDCardStatus sdStatus = checkSDCardStatus(Serial);
 
   // Write the same status output to the SD card file
+#if FEATURE_SD_LOGGING
   createtxt(ethStatus, sdStatus);
+#else
+  (void)ethStatus;
+  (void)sdStatus;
+#endif
 
   setupMotorDrive();
 }

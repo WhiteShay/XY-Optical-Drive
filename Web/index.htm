@@ -25,8 +25,10 @@
     <button id="b-ccw" class="mb" onclick="cmd('ccw')">&#9664; CCLKW</button>
     <button id="b-stop" class="mb" onclick="cmd('stop')">&#9646;&#9646; Stop</button>
     <button id="b-cw" class="mb" onclick="cmd('cw')">CLKW &#9654;</button>
+    <button id="b-motortest" class="mb" onclick="runMotorTest()" style="margin-left:8px; background:#1565c0; color:#fff;">Run Motor Test</button>
   </div>
   <p id="ms">Status: Stopped</p>
+  <p id="mts">Motor Test: Idle</p>
 
   <script>
     fetch('/status').then(function(r){ return r.json(); }).then(function(d){
@@ -39,7 +41,20 @@
 
     var L = { cw: 'Running CW', ccw: 'Running CCLKW', stop: 'Stopped' };
     var B = ['cw', 'ccw', 'stop'];
+    var motorTestRunning = false;
+
+    function setMotorControlsEnabled(enabled) {
+      B.forEach(function(x) {
+        var b = document.getElementById('b-' + x);
+        b.disabled = !enabled;
+        b.style.opacity = enabled ? '1' : '0.6';
+      });
+    }
+
     function cmd(d) {
+      if (motorTestRunning) {
+        return;
+      }
       fetch('/' + d).then(function() {
         document.getElementById('ms').textContent = 'Status: ' + L[d];
         B.forEach(function(x) {
@@ -47,6 +62,33 @@
           b.style.background = x === d ? '#4CAF50' : '#2d2d2d';
           b.style.color = x === d ? 'white' : '#e0e0e0';
         });
+      });
+    }
+
+    function runMotorTest() {
+      var testBtn = document.getElementById('b-motortest');
+      var testStatus = document.getElementById('mts');
+
+      motorTestRunning = true;
+      setMotorControlsEnabled(false);
+      testBtn.disabled = true;
+      testBtn.style.opacity = '0.7';
+      testStatus.textContent = 'Motor Test: Running (~25s)...';
+
+      fetch('/motortest').then(function(r) {
+        if (!r.ok) {
+          throw new Error('HTTP ' + r.status);
+        }
+        return r.text();
+      }).then(function() {
+        testStatus.textContent = 'Motor Test: Completed';
+      }).catch(function(e) {
+        testStatus.textContent = 'Motor Test: Failed (' + e.message + ')';
+      }).finally(function() {
+        motorTestRunning = false;
+        setMotorControlsEnabled(true);
+        testBtn.disabled = false;
+        testBtn.style.opacity = '1';
       });
     }
   </script>
