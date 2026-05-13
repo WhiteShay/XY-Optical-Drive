@@ -99,6 +99,7 @@ void printSPIPinStatus(Print &out, const __FlashStringHelper *label);
 
 void handleClient(EthernetClient client);
 void sendStatusResponse(EthernetClient client);
+void sendHardwareStatusResponse(EthernetClient client);
 void sendHTMLPage(EthernetClient client);
 
 void printSPIPinStatus(Print &out, const __FlashStringHelper *label) {
@@ -535,6 +536,8 @@ void handleClient(EthernetClient client) {
 
   if (strstr(request, "GET /status ")) {
     sendStatusResponse(client);
+  } else if (strstr(request, "GET /hwstatus ")) {
+    sendHardwareStatusResponse(client);
   } else if (strstr(request, "GET /cw ")) {
     digitalWrite(PIN_MOTOR_CW, HIGH);
     digitalWrite(PIN_MOTOR_CCW, LOW);
@@ -569,6 +572,34 @@ void sendStatusResponse(EthernetClient client) {
   client.println(F("}"));
 }
 
+void sendHardwareStatusResponse(EthernetClient client) {
+  // Return hardware status from SD card as plain text.
+  client.println(F("HTTP/1.1 200 OK"));
+  client.println(F("Content-Type: text/plain"));
+  client.println();
+
+  // Read test.txt from SD and stream it directly to client
+  ActiveSD();
+  if (!gSdReady) {
+    activeEthernet();
+    client.println(F("SD card not available"));
+  } else {
+    File txt = SD.open("test.txt", FILE_READ);
+    if (!txt) {
+      activeEthernet();
+      client.println(F("test.txt not found"));
+    } else {
+      uint8_t buf[32];
+      while (txt.available()) {
+        int n = txt.read(buf, sizeof(buf));
+        if (n > 0) client.write(buf, n);
+      }
+      txt.close();
+      activeEthernet();
+    }
+  }
+}
+
 void sendHTMLPage(EthernetClient client) {
   // Render the firmware-served control page with status text and motor buttons.
   client.println(F("HTTP/1.1 200 OK"));
@@ -591,28 +622,7 @@ void sendHTMLPage(EthernetClient client) {
   // --- Hardware Setup Report (test.txt) ---
   client.println(F("<hr><h2>Hardware Setup Report</h2>"));
   client.println(F("<pre style='background:#f4f4f4;padding:12px;border:1px solid #ccc;white-space:pre-wrap;'>"));
-
-  // Read test.txt from SD and stream it directly to client
-  ActiveSD();
-  if (!gSdReady) {
-    activeEthernet();
-    client.println(F("(SD not available)"));
-  } else {
-    File txt = SD.open("test.txt", FILE_READ);
-    if (!txt) {
-      activeEthernet();
-      client.println(F("(test.txt not found)"));
-    } else {
-      uint8_t buf[32];
-      while (txt.available()) {
-        int n = txt.read(buf, sizeof(buf));
-        if (n > 0) client.write(buf, n);
-      }
-      txt.close();
-      activeEthernet();
-    }
-  }
-
+  client.println(F("(Use /hwstatus endpoint to fetch hardware report separately)"));
   client.println(F("</pre>"));
 
   // --- Motor Control ---

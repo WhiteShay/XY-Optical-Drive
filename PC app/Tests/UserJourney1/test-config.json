@@ -1,0 +1,106 @@
+{
+  "testName": "UserJourney1 - Device Discovery & Webpage Access",
+  "description": "Validates network scan, device discovery, device addition, and webpage access workflow",
+  "appExecutable": "..\\..\\XYoptDrive\\bin\\Debug\\net8.0-windows\\XYoptDrive.exe",
+  "appName": "XYoptDrive",
+  "testSteps": [
+    {
+      "id": 1,
+      "name": "Launch Application",
+      "type": "launch-app",
+      "timeout": 5000,
+      "expectedResult": "Application window visible"
+    },
+    {
+      "id": 2,
+      "name": "Set Subnet for Scan",
+      "type": "ui-action",
+      "action": "set-text",
+      "target": "TxtSubnet",
+      "value": "169.254.43.0",
+      "timeout": 2000,
+      "expectedResult": "Subnet field shows 169.254.43.0"
+    },
+    {
+      "id": 3,
+      "name": "Initiate Network Scan",
+      "type": "ui-action",
+      "action": "click-button",
+      "target": "BtnScan",
+      "timeout": 2000,
+      "expectedResult": "Scan progress bar visible"
+    },
+    {
+      "id": 4,
+      "name": "Wait for Scan Completion",
+      "type": "wait",
+      "timeout": 40000,
+      "condition": "scan-complete",
+      "expectedResult": "Device 169.254.43.138 appears in scan results"
+    },
+    {
+      "id": 5,
+      "name": "Select Device from Scan",
+      "type": "ui-action",
+      "action": "select-item",
+      "target": "ScanResultsList",
+      "ipAddress": "169.254.43.138",
+      "timeout": 2000,
+      "expectedResult": "Device 169.254.43.138 selected in results"
+    },
+    {
+      "id": 6,
+      "name": "Add Device from Scan",
+      "type": "ui-action",
+      "action": "click-button",
+      "target": "BtnAddFromScan",
+      "timeout": 2000,
+      "expectedResult": "Device added to main device list"
+    },
+    {
+      "id": 7,
+      "name": "Verify Device in List",
+      "type": "ui-action",
+      "action": "verify-item",
+      "target": "DeviceGrid",
+      "ipAddress": "169.254.43.138",
+      "timeout": 2000,
+      "expectedResult": "Device 169.254.43.138 visible in DeviceGrid with status Online"
+    },
+    {
+      "id": 8,
+      "name": "Double-Click Device",
+      "type": "ui-action",
+      "action": "double-click-item",
+      "target": "DeviceGrid",
+      "ipAddress": "169.254.43.138",
+      "timeout": 3000,
+      "expectedResult": "Browser should open with http://169.254.43.138"
+    },
+    {
+      "id": 9,
+      "name": "Verify Webpage Access",
+      "type": "web-test",
+      "url": "http://169.254.43.138",
+      "timeout": 5000,
+      "expectedStatusCode": 200,
+      "expectedResult": "Webpage loads successfully"
+    },
+    {
+      "id": 10,
+      "name": "Check Arduino Status Endpoint",
+      "type": "web-test",
+      "url": "http://169.254.43.138/status",
+      "timeout": 5000,
+      "expectedStatusCode": 200,
+      "expectedResult": "Status endpoint responds with uptime data"
+    }
+  ],
+  "testDevice": {
+    "ipAddress": "169.254.43.138",
+    "expectedName": "Arduino",
+    "expectedRole": "XY Optical Drive",
+    "expectedStatus": "Online"
+  },
+  "reportOutputPath": ".\\test-report.json"
+}
