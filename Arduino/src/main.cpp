@@ -46,14 +46,6 @@
 #include <ModbusMaster.h>
 #include <SoftwareSerial.h>
 
-#ifndef FEATURE_SD_LOGGING
-#define FEATURE_SD_LOGGING 1
-#endif
-
-#ifndef FEATURE_MOTORTEST_ENDPOINT
-#define FEATURE_MOTORTEST_ENDPOINT 1
-#endif
-
 // ================= NETWORK CONFIGURATION =================
 //                    MAC Address: 
 // Specific to your shield. If you change shields, update this.
@@ -64,7 +56,7 @@ byte mac[6] = { 0xA8, 0x61, 0x0A, 0xAE, 0x1C, 0xE4 };
 // If connecting directly to PC without router, change to 192.168.1.177 or match your PC's Autoconfig IP.
 IPAddress ip(169, 254, 43, 138);
 // IPAddress gateway(169, 254, 43, 1);
-IPAddress subnet(255, 255, 0 , 0);
+//IPAddress subnet(255, 255, 0 , 0);
 // IPAddress myDns(8, 8, 8, 8); // Not strictly used for local control
 
 // ================= WEB SERVER =================
@@ -78,15 +70,14 @@ const uint8_t PIN_LED_motCW  = 2;  // DO: Clockwise direction output / test LED 
 const uint8_t PIN_LED_motCCW = 5;  // DO: Counter-clockwise direction output / test LED CCW
 
 // ================= MODBUS MOTOR CONFIGURATION =================
-// Modbus RTU runs on SoftwareSerial to keep hardware Serial free for PC debug.
-// D8 = RX (from RS485 adapter TX), D9 = TX (to RS485 adapter RX).
-static const uint32_t PC_BAUD = 115200;
+// Modbus RTU uses SoftwareSerial on pins 9 (RX) and 8 (TX).
+SoftwareSerial modbusSerial(9, 8);
 static const uint32_t MODBUS_BAUD = 9600;
 static const uint8_t MOTOR_SLAVE_ID = 1;
-static const uint8_t MODBUS_RX_PIN = 8;
-static const uint8_t MODBUS_TX_PIN = 9;
 
-SoftwareSerial modbusSerial(MODBUS_RX_PIN, MODBUS_TX_PIN);
+// Debug Serial hardware line : RX=pin0, TX=pin1
+static const uint32_t DEBUG_BAUD = 115200;
+
 ModbusMaster motor;
 
 // Register map from the motor drive manual
@@ -169,13 +160,9 @@ void serviceMotorJog();
 const __FlashStringHelper* motorStateText();
 void sendMotorActionResponse(EthernetClient client, const char *message, bool keepAlive);
 
-static const uint16_t HTTP_READ_TIMEOUT_MS = 250;
-static const uint16_t HTTP_KEEPALIVE_IDLE_MS = 75;
+static const uint16_t HTTP_READ_TIMEOUT_MS = 1000;
+static const uint16_t HTTP_KEEPALIVE_IDLE_MS = 1000;
 static const uint8_t HTTP_MAX_REQUESTS_PER_CONNECTION = 4;
-static const uint8_t HTTP_REQUEST_LINE_BUFFER_SIZE = 64;
-static const uint8_t HTTP_HEADER_LINE_BUFFER_SIZE = 64;
-static const uint8_t HTTP_METHOD_BUFFER_SIZE = 8;
-static const uint8_t HTTP_PATH_BUFFER_SIZE = 20;
 
 EthernetStatus checkEthernetStatus(Print &out) {
   EthernetStatus status = {};
@@ -184,7 +171,7 @@ EthernetStatus checkEthernetStatus(Print &out) {
 
   activeEthernet(); // Ensures SD is de-selected (HIGH) and Ethernet CS is active (LOW)
   delay(100); // Delay to allow hardware to stabilize before checking status
-  Ethernet.begin(mac, ip, subnet); // Initialize Ethernet with manually defined MAC address and IP
+  Ethernet.begin(mac, ip); // Initialize Ethernet with manually defined MAC address and IP
 
   // Check if Ethernet shield is present
   status.hwStatus = Ethernet.hardwareStatus();
@@ -641,11 +628,10 @@ void sendMotorActionResponse(EthernetClient client, const char *message, bool ke
 // ================= MOTOR TEST SEQUENCE =================
 // Complete motor test sequence: power on delay, forward jog, stop, reverse jog, stop.
 // This function blocks until the entire sequence completes (~25 seconds total).
-#if FEATURE_MOTORTEST_ENDPOINT
 void motorTestSequence() {
-  // Phase 1: Power-on delay (20 seconds)
+  // Phase 1: Power-on delay (2 seconds)
   unsigned long phaseStart = millis();
-  while (millis() - phaseStart < 20000) {
+  while (millis() - phaseStart < 2000) {
     serviceMotorJog();
     delay(1);
   }
@@ -681,102 +667,44 @@ void motorTestSequence() {
   // Phase 6: Final stop
   stopMotor();
 }
-#endif
 
 // ================= WEB SERVER FUNCTIONS =================
 void handleClient(EthernetClient client) {
-  uint8_t requestsServed = 0;
+  // Read only the HTTP request line (the first line ending in \n).
+  // server.available() guarantees data is already in the W5100 FIFO when we
+  // arrive here, so no timeout logic is needed — just drain bytes until \n.
+  char request[48] = {0};
+  size_t index = 0;
+  while (client.available() && index < sizeof(request) - 1) {
+    char c = client.read();
+    request[index++] = c;
+    if (c == '\n') break;
+  }
+  request[index] = '\0';
 
-  while (client.connected() && requestsServed < HTTP_MAX_REQUESTS_PER_CONNECTION) {
-    char requestLine[HTTP_REQUEST_LINE_BUFFER_SIZE] = {0};
-    if (!readHttpLine(client, requestLine, sizeof(requestLine), HTTP_KEEPALIVE_IDLE_MS)) {
-      break;
-    }
-
-    if (requestLine[0] == '\0') {
-      continue;
-    }
-
-    char method[HTTP_METHOD_BUFFER_SIZE] = {0};
-    char path[HTTP_PATH_BUFFER_SIZE] = {0};
-    bool http11 = false;
-
-    if (!parseRequestLine(requestLine, method, sizeof(method), path, sizeof(path), http11)) {
-      client.println(F("HTTP/1.1 400 Bad Request"));
-      client.println(F("Connection: close"));
-      client.println();
-      break;
-    }
-
-    bool keepAlive = http11;
-    while (true) {
-      char headerLine[HTTP_HEADER_LINE_BUFFER_SIZE] = {0};
-      bool gotLine = readHttpLine(client, headerLine, sizeof(headerLine), HTTP_READ_TIMEOUT_MS);
-      if (!gotLine) {
-        keepAlive = false;
-        break;
-      }
-      if (headerLine[0] == '\0') {
-        break;
-      }
-      if (strstr(headerLine, "Connection: close") || strstr(headerLine, "Connection: Close")) {
-        keepAlive = false;
-      }
-      if (strstr(headerLine, "Connection: keep-alive") || strstr(headerLine, "Connection: Keep-Alive")) {
-        keepAlive = true;
-      }
-    }
-
-    // Prevent socket starvation and responsiveness drops on Uno: close after each response.
-    keepAlive = false;
-
-    // Redundant with forced close, but kept as a guardrail if keep-alive is re-enabled later.
-    if (requestsServed + 1 >= HTTP_MAX_REQUESTS_PER_CONNECTION) {
-      keepAlive = false;
-    }
-
-    if (strcmp(method, "GET") != 0) {
-      client.println(F("HTTP/1.1 405 Method Not Allowed"));
-      client.println(F("Allow: GET"));
-      client.println(F("Connection: close"));
-      client.println();
-      break;
-    }
-
-    if (strcmp(path, "/status") == 0) {
-      sendStatusResponse(client, keepAlive);
-    } else if (strcmp(path, "/cw") == 0) {
-      startMotorCW();
-      sendMotorActionResponse(client, "CW JOG started", keepAlive);
-    } else if (strcmp(path, "/ccw") == 0) {
-      startMotorCCW();
-      sendMotorActionResponse(client, "CCW JOG started", keepAlive);
-    } else if (strcmp(path, "/stop") == 0) {
-      stopMotor();
-      sendMotorActionResponse(client, "Motor stopped", keepAlive);
-#if FEATURE_MOTORTEST_ENDPOINT
-    } else if (strcmp(path, "/motortest") == 0) {
-      // Motor test sequence endpoint: runs complete test blocking for ~25 seconds
-      keepAlive = false;
-      motorTestSequence();
-      sendMotorActionResponse(client, "Motor test sequence completed", keepAlive);
-#endif
-    } else if (strcmp(path, "/hwstatus") == 0) {
-      keepAlive = false;
-      sendHWStatusResponse(client, keepAlive);
-    } else if (strcmp(path, "/") == 0) {
-      keepAlive = false;
-      sendHTMLPage(client, keepAlive);
-    } else {
-      client.println(F("HTTP/1.1 404 Not Found"));
-      client.println(keepAlive ? F("Connection: keep-alive") : F("Connection: close"));
-      client.println();
-    }
-
-    requestsServed++;
-    if (!keepAlive) {
-      break;
-    }
+  // Dispatch on the request line. strstr() handles any trailing \r\n cleanly.
+  if (strstr(request, "GET /status ")) {
+    sendStatusResponse(client, false);
+  } else if (strstr(request, "GET /cw ")) {
+    startMotorCW();
+    sendMotorActionResponse(client, "CW JOG started", false);
+  } else if (strstr(request, "GET /ccw ")) {
+    startMotorCCW();
+    sendMotorActionResponse(client, "CCW JOG started", false);
+  } else if (strstr(request, "GET /stop ")) {
+    stopMotor();
+    sendMotorActionResponse(client, "Motor stopped", false);
+  } else if (strstr(request, "GET /motortest ")) {
+    motorTestSequence();
+    sendMotorActionResponse(client, "Motor test sequence completed", false);
+  } else if (strstr(request, "GET /hwstatus ")) {
+    sendHWStatusResponse(client, false);
+  } else if (strstr(request, "GET / ")) {
+    sendHTMLPage(client, false);
+  } else {
+    client.println(F("HTTP/1.1 404 Not Found"));
+    client.println(F("Connection: close"));
+    client.println();
   }
 
   client.stop();
@@ -799,9 +727,9 @@ void sendStatusResponse(EthernetClient client, bool keepAlive) {
 }
 
 void sendHWStatusResponse(EthernetClient client, bool keepAlive) {
-  ActiveSD();
+  // sdReady is a plain bool — no SPI needed to check it.
+  // The SPI bus is already in Ethernet mode when we arrive here from handleClient().
   if (!sdReady) {
-    activeEthernet();
     client.println(F("HTTP/1.1 503 Service Unavailable"));
     client.println(F("Content-Type: text/plain"));
     client.println(keepAlive ? F("Connection: keep-alive") : F("Connection: close"));
@@ -809,13 +737,19 @@ void sendHWStatusResponse(EthernetClient client, bool keepAlive) {
     client.println(F("SD not available"));
     return;
   }
+
+  // Send HTTP headers while SPI is still in Ethernet mode.
   sendHttpCommonHeaders(client, F("text/plain"), keepAlive);
+
+  // Switch to SD only now that the headers are out.
+  ActiveSD();
   File txt = SD.open("test.txt", FILE_READ);
   if (!txt) {
     activeEthernet();
     client.println(F("test.txt not found"));
     return;
   }
+
   uint8_t buf[32];
   while (true) {
     ActiveSD();
@@ -831,11 +765,11 @@ void sendHWStatusResponse(EthernetClient client, bool keepAlive) {
 }
 
 // Serve index.htm from SD card.
-// Copy Web/index.html to the SD card as index.htm (SD library uses 8.3 filenames).
+
 void sendHTMLPage(EthernetClient client, bool keepAlive) {
-  ActiveSD();
+  // sdReady is a plain bool — no SPI needed to check it.
+  // The SPI bus is already in Ethernet mode when we arrive here from handleClient().
   if (!sdReady) {
-    activeEthernet();
     client.println(F("HTTP/1.1 503 Service Unavailable"));
     client.println(F("Content-Type: text/html"));
     client.println(keepAlive ? F("Connection: keep-alive") : F("Connection: close"));
@@ -843,8 +777,12 @@ void sendHTMLPage(EthernetClient client, bool keepAlive) {
     client.println(F("<html><body style='margin:0; padding:16px; background:#1e1e1e; color:#e0e0e0; font-family:Arial,sans-serif;'><h2>SD not available</h2><p>The web page could not be loaded because the SD card is not ready.</p></body></html>"));
     return;
   }
-  File html = SD.open("index.htm", FILE_READ);
+
+  // Switch to SD to open the file, then immediately assess success/failure.
+  ActiveSD();
+  File html = SD.open("/index.htm", FILE_READ);
   if (!html) {
+    // File not found: switch to Ethernet and send a full 404 response.
     activeEthernet();
     client.println(F("HTTP/1.1 404 Not Found"));
     client.println(F("Content-Type: text/html"));
@@ -853,9 +791,13 @@ void sendHTMLPage(EthernetClient client, bool keepAlive) {
     client.println(F("<html><body style='margin:0; padding:16px; background:#1e1e1e; color:#e0e0e0; font-family:Arial,sans-serif;'><h2>index.htm not found on SD card</h2><p>Place the web page on the SD card to enable the dark-mode interface.</p></body></html>"));
     return;
   }
+
+  // File is open. Switch back to Ethernet to send the 200 headers before streaming.
+  activeEthernet();
   sendHttpCommonHeaders(client, F("text/html"), keepAlive);
-  uint8_t buf[32];
-  while (true) {
+
+  uint8_t buf[64];
+  while (client.connected()) {
     ActiveSD();
     if (!html.available()) break;
     int n = html.read(buf, sizeof(buf));
@@ -867,6 +809,68 @@ void sendHTMLPage(EthernetClient client, bool keepAlive) {
   html.close();
   activeEthernet();
 }
+
+// ================= SD DIAGNOSTIC =================
+// Call once from setup() to print a full SD health report to Serial.
+// Checks: SD.begin(), root file listing, and direct open of "/index.htm".
+/*void diagSDInit() {
+  Serial.println(F("\n===== SD DIAGNOSTIC ====="));
+
+  ActiveSD();
+  bool ok = SD.begin(4);
+  Serial.print(F("SD.begin(4): "));
+  Serial.println(ok ? F("OK") : F("FAILED"));
+
+  if (!ok) {
+    Serial.println(F("Possible causes: no card, wrong format (use FAT32), bad contact."));
+    activeEthernet();
+    Serial.println(F("========================="));
+    return;
+  }
+
+  // List every entry in root so we can see exact filenames as stored on FAT.
+  Serial.println(F("Root directory contents:"));
+  File root = SD.open("/");
+  if (!root) {
+    Serial.println(F("  (could not open root)"));
+  } else {
+    uint8_t count = 0;
+    while (true) {
+      File entry = root.openNextFile();
+      if (!entry) break;
+      Serial.print(F("  ["));
+      Serial.print(entry.isDirectory() ? F("DIR") : F("FILE"));
+      Serial.print(F("] "));
+      Serial.print(entry.name());
+      if (!entry.isDirectory()) {
+        Serial.print(F("  "));
+        Serial.print(entry.size());
+        Serial.println(F(" bytes"));
+      } else {
+        Serial.println();
+      }
+      entry.close();
+      count++;
+    }
+    root.close();
+    if (count == 0) Serial.println(F("  (empty — no files found)"));
+  }
+
+  // Try to open the exact file main.cpp expects.
+  File f = SD.open("/index.htm", FILE_READ);
+  Serial.print(F("SD.open(\"/index.htm\"): "));
+  if (f) {
+    Serial.print(F("OK  size="));
+    Serial.print(f.size());
+    Serial.println(F(" bytes"));
+    f.close();
+  } else {
+    Serial.println(F("FAILED (file not found)"));
+  }
+
+  activeEthernet();
+  Serial.println(F("========================="));
+}*/
 
 // ================= SETUP =================
 void setup() {
@@ -883,46 +887,45 @@ void setup() {
   pinMode(PIN_LED_motCCW, OUTPUT);
   digitalWrite(PIN_LED_motCCW, LOW);
 
-  // Hardware Serial is reserved for debug on PC.
-  Serial.begin(PC_BAUD);
+  // Hardware Serial is the debug/status channel over USB.
+  Serial.begin(DEBUG_BAUD);
+
+  // Modbus RTU is on SoftwareSerial (pins 9 RX, 8 TX).
   modbusSerial.begin(MODBUS_BAUD);
   motor.begin(MOTOR_SLAVE_ID, modbusSerial);
 
   delay(500); // Delay to let hardware power up before checks
 
-  // Check SPI pin status (10-13) ==> test function to verify SPI communication and pin configuration before checking Ethernet and SD card status
-  // printSPIPinStatus();
-
-  // Check Ethernet shield status (prints to Serial monitor)
+  // Check Ethernet shield status (prints to hardware serial)
   EthernetStatus ethStatus = checkEthernetStatus(Serial);
 
+  // Check SD card status (prints to hardware serial)
+  SDCardStatus sdStatus = checkSDCardStatus(Serial);
+
+  // Detailed SD diagnostic: init, file listing, index.htm open check.
+  diagSDInit();
+
+  // Write the same status output to the SD card file
+  createtxt(ethStatus, sdStatus);
+
+  delay(500); // Delay to ensure SD file operations complete before starting the server
+  activeEthernet();
   // Start web server only after Ethernet is initialized
   server.begin();
 
-  // Check SPI pin status (10-13)==> test funct
-  //printSPIPinStatus();
-
-  // Check SD card status (prints to Serial monitor)
-  SDCardStatus sdStatus = checkSDCardStatus(Serial);
-
-  // Write the same status output to the SD card file
-#if FEATURE_SD_LOGGING
-  createtxt(ethStatus, sdStatus);
-#else
-  (void)ethStatus;
-  (void)sdStatus;
-#endif
-
-  setupMotorDrive();
+  //setupMotorDrive();
 }
 
 void loop() {
-  // Handle web clients. The motor JOG service still runs every loop pass.
+  // server.available() returns a client only when data is already buffered in the
+  // W5100 receive FIFO. This guarantees handleClient() always has data ready on entry
+  // and avoids the ERR_CONNECTION_RESET that occurs when accept() hands off the socket
+  // before the browser has finished sending its request line.
   EthernetClient client = server.available();
   if (client) {
     handleClient(client);
   }
 
   // Critical: refresh 0x4001/0x4002 faster than 50 ms while moving.
-  serviceMotorJog();
+  //serviceMotorJog();
 }
