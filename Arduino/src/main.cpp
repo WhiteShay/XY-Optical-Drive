@@ -113,6 +113,20 @@ MotorState motorState = MOTOR_STOPPED;
 uint32_t lastJogRefresh = 0;
 uint8_t lastModbusResult = 0;
 
+// ================= MOTOR TEST STATE MACHINE =================
+enum MotorTestPhase {
+  MTEST_IDLE = 0,
+  MTEST_POWER_ON_DELAY,   // wait 2000 ms before first command
+  MTEST_SETUP_SETTLE,     // wait 300 ms after setupMotorDrive()
+  MTEST_FORWARD_JOG,      // run CW for 3000 ms
+  MTEST_STOP_PAUSE,       // stopped for 2000 ms
+  MTEST_REVERSE_JOG,      // run CCW for 3000 ms
+  MTEST_DONE              // stop and return to IDLE next tick
+};
+
+MotorTestPhase motorTestPhase     = MTEST_IDLE;
+uint32_t       motorTestPhaseStart = 0;
+
 // ================= HELPER STRUCTURES =================
 // Status result structures (small, minimal RAM) for logging to SD file
 struct EthernetStatus {
@@ -159,6 +173,9 @@ void stopMotor();
 void serviceMotorJog();
 const __FlashStringHelper* motorStateText();
 void sendMotorActionResponse(EthernetClient client, const char *message, bool keepAlive);
+void startMotorTest();
+void serviceMotorTest();
+void diagSDInit();
 
 static const uint16_t HTTP_READ_TIMEOUT_MS = 1000;
 static const uint16_t HTTP_KEEPALIVE_IDLE_MS = 1000;
@@ -234,7 +251,10 @@ SDCardStatus checkSDCardStatus(Print &out) {
     sdReady = true;
     out.println(F("SD card: DETECTED and INITIALIZED"));
 
-    // Get card information
+    // Sd2Card/SdVolume direct calls commented out — they re-initialize the card
+    // at SPI_HALF_SPEED and corrupt the SD library's internal volume handle,
+    // causing SD.open("/") to fail in subsequent calls.
+    /*
     Sd2Card card;
     SdVolume volume;
     uint32_t volumesize;
@@ -274,6 +294,7 @@ SDCardStatus checkSDCardStatus(Print &out) {
         out.println(F("Remaining space: Unknown"));
       }
     }
+    */
   }
 
   // Hand SPI bus control back to Ethernet for network operations.
@@ -449,17 +470,14 @@ void writeHardwareStatusToFile(File &file, const EthernetStatus &eth, const SDCa
 
 void createtxt(const EthernetStatus &eth, const SDCardStatus &sd) {
   ActiveSD();
-
-  // Ensure SD is initialized (assumes CS already set correctly)
-  if (!SD.begin(4)) {
-    return;
-  }
+  delayMicroseconds(100); // settle after SPI bus switch
 
   // Overwrite existing file so status is fresh each run
   SD.remove("test.txt");
 
   File file = SD.open("test.txt", FILE_WRITE);
   if (!file) {
+    activeEthernet(); // release SPI bus before returning
     return;
   }
 
@@ -479,11 +497,7 @@ void createtxt(const EthernetStatus &eth, const SDCardStatus &sd) {
 void verifyAndClearTxtFile() {
 
   ActiveSD();
-
-  // Ensure SD is initialized
-  if (!SD.begin(4)) {
-    return;
-  }
+  delayMicroseconds(100); // settle after SPI bus switch
 
   // Check if the file exists
   if (!SD.exists("test.txt")) {
@@ -625,47 +639,75 @@ void sendMotorActionResponse(EthernetClient client, const char *message, bool ke
   client.println();
 }
 
-// ================= MOTOR TEST SEQUENCE =================
-// Complete motor test sequence: power on delay, forward jog, stop, reverse jog, stop.
-// This function blocks until the entire sequence completes (~25 seconds total).
-void motorTestSequence() {
-  // Phase 1: Power-on delay (2 seconds)
-  unsigned long phaseStart = millis();
-  while (millis() - phaseStart < 2000) {
-    serviceMotorJog();
-    delay(1);
+// ================= MOTOR TEST STATE MACHINE =================
+// Non-blocking replacement for the old blocking motorTestSequence().
+// Call startMotorTest() to arm; serviceMotorTest() (called from loop()) advances
+// the sequence one tick at a time so the web server stays responsive throughout.
+
+void startMotorTest() {
+  if (motorTestPhase != MTEST_IDLE) return;   // already running, ignore
+  motorTestPhase      = MTEST_POWER_ON_DELAY;
+  motorTestPhaseStart = millis();
+}
+
+void serviceMotorTest() {
+  if (motorTestPhase == MTEST_IDLE) return;
+
+  uint32_t now = millis();
+
+  switch (motorTestPhase) {
+
+    case MTEST_POWER_ON_DELAY:
+      // Wait 2 s, then load JOG parameters into the drive.
+      if (now - motorTestPhaseStart >= 2000) {
+        setupMotorDrive();            // ~15 ms of Modbus writes, acceptable
+        motorTestPhase      = MTEST_SETUP_SETTLE;
+        motorTestPhaseStart = now;
+      }
+      break;
+
+    case MTEST_SETUP_SETTLE:
+      // Give the drive 300 ms to apply the new parameters.
+      if (now - motorTestPhaseStart >= 300) {
+        startMotorCW();
+        motorTestPhase      = MTEST_FORWARD_JOG;
+        motorTestPhaseStart = now;
+      }
+      break;
+
+    case MTEST_FORWARD_JOG:
+      serviceMotorJog();
+      if (now - motorTestPhaseStart >= 3000) {
+        stopMotor();
+        motorTestPhase      = MTEST_STOP_PAUSE;
+        motorTestPhaseStart = now;
+      }
+      break;
+
+    case MTEST_STOP_PAUSE:
+      if (now - motorTestPhaseStart >= 2000) {
+        startMotorCCW();
+        motorTestPhase      = MTEST_REVERSE_JOG;
+        motorTestPhaseStart = now;
+      }
+      break;
+
+    case MTEST_REVERSE_JOG:
+      serviceMotorJog();
+      if (now - motorTestPhaseStart >= 3000) {
+        stopMotor();
+        motorTestPhase = MTEST_DONE;
+      }
+      break;
+
+    case MTEST_DONE:
+      motorTestPhase = MTEST_IDLE;
+      break;
+
+    default:
+      motorTestPhase = MTEST_IDLE;
+      break;
   }
-
-  // Phase 2: Set speed and enable drive
-  setupMotorDrive();
-  delay(300);
-
-  // Phase 3: Forward jog for 3 seconds
-  startMotorCW();
-  phaseStart = millis();
-  while (millis() - phaseStart < 3000) {
-    serviceMotorJog();
-    delay(1);
-  }
-
-  // Phase 4: Quick stop pause for 2 seconds
-  stopMotor();
-  phaseStart = millis();
-  while (millis() - phaseStart < 2000) {
-    serviceMotorJog();
-    delay(1);
-  }
-
-  // Phase 5: Reverse jog for 3 seconds
-  startMotorCCW();
-  phaseStart = millis();
-  while (millis() - phaseStart < 3000) {
-    serviceMotorJog();
-    delay(1);
-  }
-
-  // Phase 6: Final stop
-  stopMotor();
 }
 
 // ================= WEB SERVER FUNCTIONS =================
@@ -695,8 +737,8 @@ void handleClient(EthernetClient client) {
     stopMotor();
     sendMotorActionResponse(client, "Motor stopped", false);
   } else if (strstr(request, "GET /motortest ")) {
-    motorTestSequence();
-    sendMotorActionResponse(client, "Motor test sequence completed", false);
+    startMotorTest();
+    sendMotorActionResponse(client, "Motor test started", false);
   } else if (strstr(request, "GET /hwstatus ")) {
     sendHWStatusResponse(client, false);
   } else if (strstr(request, "GET / ")) {
@@ -743,6 +785,7 @@ void sendHWStatusResponse(EthernetClient client, bool keepAlive) {
 
   // Switch to SD only now that the headers are out.
   ActiveSD();
+  delayMicroseconds(100); // settle after SPI bus switch
   File txt = SD.open("test.txt", FILE_READ);
   if (!txt) {
     activeEthernet();
@@ -780,6 +823,7 @@ void sendHTMLPage(EthernetClient client, bool keepAlive) {
 
   // Switch to SD to open the file, then immediately assess success/failure.
   ActiveSD();
+  delayMicroseconds(100); // settle after SPI bus switch
   File html = SD.open("/index.htm", FILE_READ);
   if (!html) {
     // File not found: switch to Ethernet and send a full 404 response.
@@ -813,20 +857,17 @@ void sendHTMLPage(EthernetClient client, bool keepAlive) {
 // ================= SD DIAGNOSTIC =================
 // Call once from setup() to print a full SD health report to Serial.
 // Checks: SD.begin(), root file listing, and direct open of "/index.htm".
-/*void diagSDInit() {
+void diagSDInit() {
   Serial.println(F("\n===== SD DIAGNOSTIC ====="));
 
-  ActiveSD();
-  bool ok = SD.begin(4);
-  Serial.print(F("SD.begin(4): "));
-  Serial.println(ok ? F("OK") : F("FAILED"));
-
-  if (!ok) {
-    Serial.println(F("Possible causes: no card, wrong format (use FAT32), bad contact."));
-    activeEthernet();
+  if (!sdReady) {
+    Serial.println(F("SD not ready — SD.begin() failed in checkSDCardStatus, skipping."));
     Serial.println(F("========================="));
     return;
   }
+
+  ActiveSD();
+  delayMicroseconds(100); // settle after SPI bus switch
 
   // List every entry in root so we can see exact filenames as stored on FAT.
   Serial.println(F("Root directory contents:"));
@@ -870,7 +911,7 @@ void sendHTMLPage(EthernetClient client, bool keepAlive) {
 
   activeEthernet();
   Serial.println(F("========================="));
-}*/
+}
 
 // ================= SETUP =================
 void setup() {
@@ -902,7 +943,8 @@ void setup() {
   // Check SD card status (prints to hardware serial)
   SDCardStatus sdStatus = checkSDCardStatus(Serial);
 
-  // Detailed SD diagnostic: init, file listing, index.htm open check.
+  // SD diagnostic: prints SD health + exact filename list to Serial monitor.
+  // Must run before createtxt() so it sees clean SD state right after SD.begin().
   diagSDInit();
 
   // Write the same status output to the SD card file
@@ -928,4 +970,5 @@ void loop() {
 
   // Critical: refresh 0x4001/0x4002 faster than 50 ms while moving.
   //serviceMotorJog();
+  serviceMotorTest();
 }

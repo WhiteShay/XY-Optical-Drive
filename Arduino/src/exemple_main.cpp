@@ -552,7 +552,7 @@ void sendHTMLPage(EthernetClient client, bool keepAlive) {
 
   // Normal path: serve index.htm from SD card.
   ActiveSD();
-  File html = SD.open("/index.htm", FILE_READ);
+  File html = SD.open("index.htm", FILE_READ);
   if (!html) {
     activeEthernet();
     client.println(F("HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<h2>index.htm not found on SD card</h2>"));
@@ -572,34 +572,6 @@ void sendHTMLPage(EthernetClient client, bool keepAlive) {
   ActiveSD(); html.close(); activeEthernet();
 }
 
-// ================= SD DIAGNOSTIC =================
-void diagSDInit() {
-  Serial.println(F("\n===== SD DIAGNOSTIC ====="));
-  ActiveSD();
-  bool ok = SD.begin(4);
-  Serial.print(F("SD.begin(4): ")); Serial.println(ok ? F("OK") : F("FAILED"));
-  if (!ok) { activeEthernet(); Serial.println(F("=========================")); return; }
-  File root = SD.open("/");
-  if (root) {
-    uint8_t count = 0;
-    while (true) {
-      File entry = root.openNextFile();
-      if (!entry) break;
-      Serial.print(F("  [")); Serial.print(entry.isDirectory() ? F("DIR") : F("FILE")); Serial.print(F("] "));
-      Serial.println(entry.name());
-      entry.close(); count++;
-    }
-    root.close();
-    if (count == 0) Serial.println(F("  (empty)"));
-  }
-  File f = SD.open("/index.htm", FILE_READ);
-  Serial.print(F("SD.open(\"/index.htm\"): "));
-  if (f) { Serial.print(F("OK  size=")); Serial.print(f.size()); Serial.println(F(" bytes")); f.close(); }
-  else   { Serial.println(F("FAILED")); }
-  activeEthernet();
-  Serial.println(F("========================="));
-}
-
 // ================= SETUP =================
 void setup() {
   pinMode(10, OUTPUT); digitalWrite(10, HIGH);
@@ -617,7 +589,6 @@ void setup() {
 
   EthernetStatus ethStatus = checkEthernetStatus(Serial);
   SDCardStatus sdStatus    = checkSDCardStatus(Serial);
-  diagSDInit();
   createtxt(ethStatus, sdStatus);
 
   delay(500);
