@@ -222,4 +222,38 @@ public partial class MainWindow : Window
 
         UpdateStatus($"'{name}' ({scanResult.IpAddress}) added");
     }
+
+    // ───── Open Device HTML Page ─────
+
+    private void DeviceGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (DeviceGrid.SelectedItem is not Device device)
+        {
+            return;
+        }
+
+        if (string.IsNullOrEmpty(device.IpAddress))
+        {
+            MessageBox.Show("Device IP address is not available.",
+                "No IP Address", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        try
+        {
+            var url = $"http://{device.IpAddress}";
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = url,
+                UseShellExecute = true
+            });
+
+            UpdateStatus($"Opening {device.Name} at {url}...");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Failed to open device page: {ex.Message}",
+                "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
 }
