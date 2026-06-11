@@ -25,72 +25,67 @@
     <button id="b-ccw" class="mb" onclick="cmd('ccw')">&#9664; CCLKW</button>
     <button id="b-stop" class="mb" onclick="cmd('stop')">&#9646;&#9646; Stop</button>
     <button id="b-cw" class="mb" onclick="cmd('cw')">CLKW &#9654;</button>
-    <button id="b-motortest" class="mb" onclick="runMotorTest()" style="margin-left:8px; background:#1565c0; color:#fff;">Run Motor Test</button>
   </div>
-  <p id="ms">Status: Stopped</p>
-  <p id="mts">Motor Test: Idle</p>
+  <p id="ms">Status: stopped</p>
+  <p id="mdetail" style="color:#9e9e9e; font-size:0.9em;">Modbus: idle</p>
 
   <script>
-    fetch('/status').then(function(r){ return r.json(); }).then(function(d){
-      document.getElementById('uptime').textContent = Math.floor(d.uptime / 1000) + ' s';
-    });
+    var L = {
+      cw: 'Running CW',
+      ccw: 'Running CCLKW',
+      stop: 'Stopped',
+      starting_cw: 'Starting CW...',
+      starting_ccw: 'Starting CCLKW...',
+      stopping: 'Stopping...',
+      stopped: 'Stopped'
+    };
+    var B = ['cw', 'ccw', 'stop'];
+
+    function formatMotorStatus(d) {
+      var label = L[d.motor_state] || d.motor_state;
+      if (d.pending) {
+        label += ' (pending)';
+      }
+      return label;
+    }
+
+    function updateMotorUi(d, activeBtn) {
+      document.getElementById('ms').textContent = 'Status: ' + formatMotorStatus(d);
+      document.getElementById('mdetail').textContent =
+        'Modbus result=' + d.last_modbus_result + ', last_tx=' + d.last_modbus_ms + ' ms';
+
+      B.forEach(function(x) {
+        var b = document.getElementById('b-' + x);
+        var active = activeBtn === x ||
+          (x === 'cw' && (d.motor_state === 'cw' || d.motor_state === 'starting_cw')) ||
+          (x === 'ccw' && (d.motor_state === 'ccw' || d.motor_state === 'starting_ccw')) ||
+          (x === 'stop' && (d.motor_state === 'stopped' || d.motor_state === 'stopping'));
+        b.style.background = active ? '#4CAF50' : '#2d2d2d';
+        b.style.color = active ? 'white' : '#e0e0e0';
+      });
+    }
+
+    function refreshStatus() {
+      return fetch('/status').then(function(r) { return r.json(); }).then(function(d) {
+        document.getElementById('uptime').textContent = Math.floor(d.uptime / 1000) + ' s';
+        updateMotorUi(d, null);
+      });
+    }
 
     fetch('/hwstatus').then(function(r){ return r.text(); }).then(function(t){
       document.getElementById('hwstatus').textContent = t;
     });
 
-    var L = { cw: 'Running CW', ccw: 'Running CCLKW', stop: 'Stopped' };
-    var B = ['cw', 'ccw', 'stop'];
-    var motorTestRunning = false;
-
-    function setMotorControlsEnabled(enabled) {
-      B.forEach(function(x) {
-        var b = document.getElementById('b-' + x);
-        b.disabled = !enabled;
-        b.style.opacity = enabled ? '1' : '0.6';
-      });
-    }
-
     function cmd(d) {
-      if (motorTestRunning) {
-        return;
-      }
-      fetch('/' + d).then(function() {
-        document.getElementById('ms').textContent = 'Status: ' + L[d];
-        B.forEach(function(x) {
-          var b = document.getElementById('b-' + x);
-          b.style.background = x === d ? '#4CAF50' : '#2d2d2d';
-          b.style.color = x === d ? 'white' : '#e0e0e0';
-        });
+      fetch('/' + d).then(function(r) { return r.json(); }).then(function(j) {
+        updateMotorUi(j, d);
+      }).catch(function() {
+        document.getElementById('ms').textContent = 'Status: request failed';
       });
     }
 
-    function runMotorTest() {
-      var testBtn = document.getElementById('b-motortest');
-      var testStatus = document.getElementById('mts');
-
-      motorTestRunning = true;
-      setMotorControlsEnabled(false);
-      testBtn.disabled = true;
-      testBtn.style.opacity = '0.7';
-      testStatus.textContent = 'Motor Test: Running (~25s)...';
-
-      fetch('/motortest').then(function(r) {
-        if (!r.ok) {
-          throw new Error('HTTP ' + r.status);
-        }
-        return r.text();
-      }).then(function() {
-        testStatus.textContent = 'Motor Test: Completed';
-      }).catch(function(e) {
-        testStatus.textContent = 'Motor Test: Failed (' + e.message + ')';
-      }).finally(function() {
-        motorTestRunning = false;
-        setMotorControlsEnabled(true);
-        testBtn.disabled = false;
-        testBtn.style.opacity = '1';
-      });
-    }
+    refreshStatus();
+    setInterval(refreshStatus, 500);
   </script>
 </body>
 </html>
