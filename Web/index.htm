@@ -414,6 +414,33 @@
 
     function refreshStatus() {
       return fetch('/status').then(function(r) { return r.json(); }).then(function(d) {
+        // V1.2.0 flash diet: the firmware now sends SHORT keys, 1/0 booleans
+        // and numeric enum states. Translate once here; everything below
+        // keeps the original verbose names.
+        d.uptime = d.up;
+        d.feedback_position = d.fp;
+        d.homed = d.h === 1;
+        d.feedback_position_valid = d.fv === 1;
+        d.last_modbus_result = d.mr;
+        d.last_modbus_ms = d.mt;
+        d.modbus_timeouts = d.mto;
+        d.speed_rpm = d.sp;
+        d.slave_id = d.si;
+        d.vbus = d.vb;
+        d.motors = d.mo;
+        d.homing_state = ['idle','pass1','pass2','pass2','done','error'][d.hs] || 'idle';
+        d.homing_error = d.he;
+        d.max_travel_counts = d.mx;
+        d.limits_active = d.la === 1;
+        d.limit1_cmd = d.l1;
+        d.limit2_cmd = d.l2;
+        d.limit1_hit = d.h1 === 1;
+        d.limit2_hit = d.h2 === 1;
+        d.move_guard = d.mg === 1;
+        d.guard_limit = d.gl;
+        d.move_state = ['idle','moving','done','error'][d.mvs] || 'idle';
+        d.move_error = d.mve;
+        d.motor_state = ['stopped','cw','ccw'][d.ms] || 'stopped';
         lastStatus = d;
         isHomed = (d.homed === true);
         limitsOn = (d.limits_active === true);
@@ -482,12 +509,14 @@
           updateMotorUi();
           return;
         }
-        if (j.move_state !== undefined) {
-          // Guarded CCW accepted: the firmware runs a bounded PR0 move whose
-          // target is Limit 1. Keep the hold; releasing sends /stop.
+        if (j.ok) {
+          // Guarded jog accepted ({"ok":1}): the firmware runs a bounded PR0
+          // move toward the limit. Keep the hold; releasing sends /stop.
           return refreshStatus();
         }
-        if (j.motor_state) syncMotorStateFromServer(j.motor_state);
+        if (typeof j.ms === 'number') {
+          syncMotorStateFromServer(['stopped','cw','ccw'][j.ms]);
+        }
         updateMotorUi();
       }).catch(function() {
         holdActive = false;
@@ -505,7 +534,9 @@
       clearJogPressed();
       updateMotorUi();
       fetch('/stop').then(function(r) { return r.json(); }).then(function(j) {
-        if (j.motor_state) syncMotorStateFromServer(j.motor_state);
+        if (typeof j.ms === 'number') {
+          syncMotorStateFromServer(['stopped','cw','ccw'][j.ms]);
+        }
         return refreshStatus();
       }).catch(function() {
         // No watchdog on the firmware side: the motor may still be running.
@@ -523,7 +554,9 @@
       clearJogPressed();
       updateMotorUi();
       fetch('/stop').then(function(r) { return r.json(); }).then(function(j) {
-        if (j.motor_state) syncMotorStateFromServer(j.motor_state);
+        if (typeof j.ms === 'number') {
+          syncMotorStateFromServer(['stopped','cw','ccw'][j.ms]);
+        }
         return refreshStatus();
       }).catch(function() {
         document.getElementById('ms').textContent =
