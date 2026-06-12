@@ -1,5 +1,5 @@
 ﻿/*
- * XY_Optical_Drive_V1_1_1.ino
+ * XY_Optical_Drive_V1_2_0.ino
  * * DESCRIPTION:
  * Reliable Lab Automation Controller for Arduino Uno + Ethernet Shield + Stepper Motors NEMA 17.
  *  * * HARDWARE STACK:
@@ -23,6 +23,19 @@
  * *                 /goto (NOT the homing, fixed at 200 rpm). Accepted
  * *                 range 5-400 rpm; applied at the next motion command;
  * *                 rejected (409) while any motion is running.
+ * * GET /madd?i=ID&n=NAME : register a motor (Modbus slave). ID 1-247
+ * *                 (iCL-RS DIP switches SW1-SW5 give 1-31), NAME 1-10
+ * *                 chars [A-Za-z0-9_-]. Persisted on SD in motors.txt.
+ * * GET /mdel?i=ID : delete a registered motor (the ACTIVE one cannot be
+ * *                 deleted: select another one first).
+ * * GET /msel?i=ID : select the active motor. The CURRENT motor's
+ * *                 calibration and LAST STOP position are snapshotted into
+ * *                 the registry first; if the NEW motor was calibrated, its
+ * *                 frame is RESTORED (homed, "hr":1, goto available, no
+ * *                 re-homing) - only valid while the drive stays powered.
+ * *                 Otherwise all per-motor state is reset (re-home it).
+ * *                 Re-selecting the ACTIVE motor restores its saved frame
+ * *                 after an Arduino-only reboot. 409 while moving.
  * *                 The web page converts mm -> pulses. Executed as a PR0
  * *                 RELATIVE move, so it works even though the drive never
  * *                 resets its raw feedback counter. Requires a completed
@@ -132,6 +145,36 @@
  * *   documented range 0-5000 r/min (parameter table); Pr9.03 unit rpm,
  * *   the manual's own PR example writes 600 rpm - the 5-400 window is the
  * *   project's conservative envelope, well inside the drive's limits.
+ *
+ * 13/06/2026 - V1.2.0 - Multi-motor (Modbus slave selection) + bus voltage
+ * *   - MOTOR REGISTRY: up to 4 motors (name + slave ID), persisted on the
+ * *     SD card (motors.txt, one "id name" line each), exposed in /status
+ * *     JSON ("motors", "slave_id"), managed via /madd /mdel /msel and a
+ * *     panel on the web page. MB_SLAVE_ID becomes a variable (same symbol:
+ * *     mbTransaction stays byte-identical to the validated V1.0.3) so the
+ * *     whole Modbus layer follows the selected motor. Selecting a motor
+ * *     resets every per-motor state (homed frame, limits, jog config...).
+ * *   - TELEMETRY: the iCL-RS register map has NO temperature readout (the
+ * *     manual only mentions ambient specs and overheating prevention), so
+ * *     temperature monitoring is NOT possible over RS485. The one live
+ * *     health value the drive exposes is Pr4.27 (0x0177) BUS VOLTAGE,
+ * *     unit 0.1 V: read every 3rd idle position poll (~every 3 s) and
+ * *     shown next to the position ("vb" in /status, 0 = not read yet).
+ * *   - FLASH DIET ROUND 2 (same features, same version; build hit 100.7%):
+ * *     short JSON keys + 1/0 booleans + numeric enum states (the page
+ * *     translates once in a shim), *StateText functions removed (flash AND
+ * *     RAM: their literals lived in both), /home /goto /speed and guarded
+ * *     jogs answer a shared {"ok":1}, readPositionRetry3 removed (its
+ * *     inner read already retried 3x), shorter 409 reason codes and logs.
+ * *   - PER-MOTOR CALIBRATION MEMORY (same version on request): on homing
+ * *     done, Max travel + home offset are saved into the motor's registry
+ * *     entry; the LAST STOP position is snapshotted before switching;
+ * *     selecting a CALIBRATED motor restores its frame (goto available).
+ * *     motors.txt becomes "id name cal offset travel lastStop" (old 2-field
+ * *     lines still parse: cal=0). JSON: global "hr" flag (restored frame),
+ * *     "mo" entries gain c (calibrated), x (max travel, feedback counts),
+ * *     p (last stop, cmd pulses). BOOT NEVER RESTORES: the drive's power
+ * *     state is unknown and its raw counter resets with it.
  * *  - SOFT LIMITS (firmware-side, HOMED frame): set when a homing
  * *    completes with a measured travel > 20 mm:
  * *      Limit 1 = 0 + 10 mm        (lower bound, near the zero/CCW stop)
@@ -236,7 +279,10 @@ bool sdReady = false; // Set to true after the single successful SD.begin() duri
 // The P7156-1 module has automatic direction control: no DE/RE handling needed.
 SoftwareSerial modbusSerial(8, 9);  // (rxPin, txPin)
 
-static const uint8_t  MB_SLAVE_ID            = 1;
+uint8_t MB_SLAVE_ID = 1;  // ACTIVE Modbus slave address. Variable since
+                          // V1.2.0 (motor selection); the symbol name is
+                          // unchanged so the validated Modbus layer below
+                          // (mbTransaction & frame builders) is untouched.
 static const uint8_t  MB_OK                  = 0x00;
 static const uint8_t  MB_ERR_TIMEOUT         = 0xE2;  // same code as ModbusMaster, logs stay comparable
 static const uint16_t MB_RESPONSE_TIMEOUT_MS = 80;    // worst case @ 9600 baud is ~25 ms (manual 4.1)
@@ -380,6 +426,9 @@ static const uint16_t REG_RS485_ENABLE = 0x000F;  // Pr0.07: 1 = control by RS48
 static const uint16_t REG_DIRECTION    = 0x0007;  // 0 = CW, 1 = CCW
 static const uint16_t REG_JOG_SPEED    = 0x01E1;  // Pr6.00: JOG velocity
 static const uint16_t REG_JOG_ACCEL    = 0x01E7;  // Pr6.03: JOG accel/decel
+static const uint16_t REG_BUS_VOLTAGE  = 0x0177;  // Pr4.27: bus voltage, unit 0.1 V
+                                                  // (NO temperature register exists
+                                                  // in the iCL-RS Modbus map)
 static const uint16_t REG_CONTROL_WORD = 0x1801;  // JOG command/control word
 static const uint16_t REG_TRIGGER      = 0x6002;  // Pr8.02: trigger register (homing, E-stop...)
 static const uint16_t REG_MOTION_STATUS  = 0x1003;  // bit0 fault, bit2 running, bit6 homing OK
@@ -447,6 +496,8 @@ int32_t feedbackPositionPulses = 0;
 bool feedbackPositionValid = false;
 uint8_t lastModbusResult = 0;
 uint32_t lastModbusMs = 0;
+uint16_t busVoltageRaw = 0;      // Pr4.27, 0.1 V units (0 = never read)
+bool     busVoltageValid = false;
 
 // Records the result of the last Modbus transaction (shown in /status).
 // (Definition restored here: the V1.1.0 flash-diet splice had removed it.)
@@ -477,6 +528,9 @@ uint16_t jogSpeedWritten = 0;                // last value written to Pr6.00 (0 
 // Volatile: re-run the homing after every Arduino reset or drive power cycle.
 int32_t homeOffsetPulses = 0;
 bool homed = false;              // true only after a successful homing this session
+bool homedRestored = false;      // true if the homed frame was RESTORED from the
+                                 // registry instead of measured: only valid if
+                                 // the drive stayed powered (raw counter kept)
 
 // ================= HOMING STATE / TIMING =================
 enum HomingState { H_IDLE, H_PASS1, H_PASS2_START, H_PASS2, H_DONE, H_ERROR };
@@ -524,6 +578,89 @@ int32_t limit2Cmd = 0;               // upper limit (cmd pulses) = max travel - 
 bool    limit1Hit = false;           // guarded CCW reached Limit 1 -> page pop-up
 bool    limit2Hit = false;           // guarded CW reached Limit 2 -> page pop-up
 
+// ================= MOTOR REGISTRY (Modbus slaves) =================
+static const uint8_t MAX_MOTORS = 4;
+struct MotorEntry {
+  uint8_t id;        // Modbus slave address (1-247; iCL-RS DIP: 1-31)
+  char    name[11];  // [A-Za-z0-9_-], NUL-terminated
+  uint8_t calibrated;        // 1 = the three fields below are valid
+  int32_t homeOffsetPulses;  // raw feedback counts of this motor's homed zero
+  int32_t maxTravelCounts;   // measured travel (feedback counts)
+  int32_t lastStopCmd;       // last stop position (cmd pulses, homed frame)
+};
+MotorEntry motors[MAX_MOTORS];
+uint8_t motorCount = 0;
+
+int8_t findMotorById(uint8_t id) {
+  for (uint8_t k = 0; k < motorCount; k++) {
+    if (motors[k].id == id) return (int8_t)k;
+  }
+  return -1;
+}
+
+// Soft limits from the measured travel: Limit 1 = +10 mm, Limit 2 = max-10 mm.
+// Shared by the homing end and the calibration restore on motor selection.
+void applyLimitsFromTravel() {
+  int32_t travelCmd = countsToCmdPulses(maxTravelCounts);
+  if (travelCmd > 2L * LIMIT_MARGIN_CMD) {
+    limit1Cmd = LIMIT_MARGIN_CMD;
+    limit2Cmd = travelCmd - LIMIT_MARGIN_CMD;
+    limitsActive = true;
+    Serial.print(F("L1="));
+    Serial.print(limit1Cmd);
+    Serial.print(F(" L2="));
+    Serial.println(limit2Cmd);
+  } else {
+    limitsActive = false;
+    Serial.println(F("WARN: no limits"));
+  }
+}
+
+// Saves the live calibration + LAST STOP position of the ACTIVE motor into
+// its registry entry (RAM). Call saveMotors() afterwards to persist on SD.
+void snapshotActiveMotor() {
+  int8_t idx = findMotorById(MB_SLAVE_ID);
+  if (idx < 0) return;
+  motors[idx].calibrated = (homed && maxTravelCounts > 0) ? 1 : 0;
+  motors[idx].homeOffsetPulses = homeOffsetPulses;
+  motors[idx].maxTravelCounts = maxTravelCounts;
+  if (homed && feedbackPositionValid) {
+    motors[idx].lastStopCmd =
+        countsToCmdPulses(feedbackPositionPulses - homeOffsetPulses);
+  }
+}
+
+// Restores a calibrated motor's frame: goto stays available, "hr":1 in JSON.
+// ONLY valid while the drive stayed powered (its raw counter survives).
+void restoreMotorFrame(int8_t idx) {
+  homeOffsetPulses = motors[idx].homeOffsetPulses;
+  maxTravelCounts  = motors[idx].maxTravelCounts;
+  homed = true;
+  homedRestored = true;
+  applyLimitsFromTravel();
+}
+
+// Everything tied to ONE drive: invalid as soon as another slave is selected.
+void resetPerMotorState() {
+  homed = false;
+  homedRestored = false;
+  homeOffsetPulses = 0;
+  pass1OffsetRaw = 0;
+  maxTravelCounts = 0;
+  limitsActive = false;
+  limit1Hit = false;
+  limit2Hit = false;
+  homingState = H_IDLE;
+  homingError = 0;
+  moveState = M_IDLE;
+  moveError = 0;
+  moveGuardLimit = 0;
+  jogConfigured = false;
+  jogSpeedWritten = 0;
+  feedbackPositionValid = false;
+  busVoltageValid = false;
+}
+
 // ================= HELPER STRUCTURES =================
 // Status result structures (small, minimal RAM) for logging to SD file
 struct EthernetStatus {
@@ -547,15 +684,11 @@ void serviceMotorJog();
 void servicePositionPoll();
 void startHoming();
 void serviceHoming();
-const char *homingStateText();
 void startMove(int32_t targetHomedPulses, uint16_t speedRpm, uint8_t guardLimit);
 void serviceMove();
-const char *moveStateText();
 
 void handleClient(EthernetClient client);
 void sendStatusResponse(EthernetClient client);
-void sendHomingStatusResponse(EthernetClient client);
-void sendMoveStatusResponse(EthernetClient client);
 void sendBusyResponse(EthernetClient client, const __FlashStringHelper *reason);
 void sendHWStatusResponse(EthernetClient client);
 void sendHTMLPage(EthernetClient client);
@@ -575,6 +708,19 @@ void httpHeader(EthernetClient &client, uint16_t code, const char *ctypePgm) {
   client.print(F("Content-Type: "));
   client.println((const __FlashStringHelper *)ctypePgm);
   client.println();
+}
+
+// Shared "no motion running" gate for configuration requests.
+bool rejectIfBusy(EthernetClient &client) {
+  if (homingBusy()) { sendBusyResponse(client, F("homing")); return true; }
+  if (moveState == M_MOVING) { sendBusyResponse(client, F("moving")); return true; }
+  if (motorState != MOTOR_STOPPED) { sendBusyResponse(client, F("jog")); return true; }
+  return false;
+}
+
+void sendOkResponse(EthernetClient client) {
+  httpHeader(client, 200, CT_JSON);
+  client.println(F("{\"ok\":1}"));
 }
 
 EthernetStatus checkEthernetStatus() {
@@ -608,12 +754,12 @@ void printIPAddress(Print &out, const IPAddress &address) {
 // string now lives once in flash (the old duplicated Serial/file versions
 // were a major flash cost - avr-gcc does not merge duplicate F() literals).
 void printHardwareReport(Print &out, const EthernetStatus &eth) {
-  out.println(F("--- Ethernet ---"));
+  out.println(F("--- Eth ---"));
   if (!eth.detected) {
-    out.print(F("shield: NOT DETECTED, hw="));
+    out.print(F("eth NONE hw="));
     out.println(eth.hwStatus);
   } else {
-    out.print(F("shield: OK, MAC "));
+    out.print(F("eth OK MAC "));
     for (int i = 0; i < 6; i++) {
       if (mac[i] < 16) out.print('0');
       out.print(mac[i], HEX);
@@ -630,18 +776,18 @@ void printHardwareReport(Print &out, const EthernetStatus &eth) {
     }
   }
   out.println(F("--- SD ---"));
-  out.println(sdReady ? F("SD: OK (FAT mounted)") : F("SD: FAILED (card/format/CS=4)"));
+  out.println(sdReady ? F("SD OK") : F("SD FAIL (CS=4)"));
 }
 
 void createtxt(const EthernetStatus &eth) {
   if (!sdReady) {
-    Serial.println(F("No SD: test.txt skipped"));
+    Serial.println(F("no SD"));
     return;
   }
   SD.remove("test.txt");           // FILE_WRITE = append: remove to start fresh
   File file = SD.open("test.txt", FILE_WRITE);
   if (!file) {
-    Serial.println(F("test.txt open failed"));
+    Serial.println(F("test.txt ERR"));
     return;
   }
   file.print(F("Uptime: "));
@@ -650,6 +796,97 @@ void createtxt(const EthernetStatus &eth) {
   printHardwareReport(file, eth);
   file.close();
   Serial.println(F("test.txt OK"));
+}
+
+// ================= MOTOR REGISTRY PERSISTENCE (SD: motors.txt) =================
+// One line per motor: "<id> <name>\n". Written by the firmware only, so the
+// parser can stay minimal. The registry is also exposed as JSON in /status.
+void saveMotors() {
+  if (!sdReady) return;
+  SD.remove("motors.txt");
+  File f = SD.open("motors.txt", FILE_WRITE);
+  if (!f) {
+    Serial.println(F("motors.txt ERR"));
+    return;
+  }
+  for (uint8_t k = 0; k < motorCount; k++) {
+    f.print(motors[k].id);
+    f.print(' ');
+    f.print(motors[k].name);
+    f.print(' ');
+    f.print(motors[k].calibrated);
+    f.print(' ');
+    f.print(motors[k].homeOffsetPulses);
+    f.print(' ');
+    f.print(motors[k].maxTravelCounts);
+    f.print(' ');
+    f.println(motors[k].lastStopCmd);
+  }
+  f.close();
+}
+
+void loadMotors() {
+  motorCount = 0;
+  if (sdReady) {
+    File f = SD.open("motors.txt", FILE_READ);
+    if (f) {
+      // Fields: id name cal offset travel lastStop (old 2-field lines: cal=0)
+      uint16_t id = 0;
+      uint8_t nlen = 0;
+      uint8_t field = 0;          // 0=id 1=name 2=cal 3=offset 4=travel 5=last
+      int32_t num = 0;
+      bool neg = false;
+      uint8_t cal = 0;
+      int32_t offs = 0, trav = 0, last = 0;
+      while (f.available() && motorCount < MAX_MOTORS) {
+        char c = (char)f.read();
+        if (c == '\r') continue;
+        if (c == '\n' || c == ' ') {
+          int32_t val = neg ? -num : num;
+          if      (field == 2) cal  = (uint8_t)(val != 0);
+          else if (field == 3) offs = val;
+          else if (field == 4) trav = val;
+          else if (field == 5) last = val;
+          num = 0; neg = false;
+          if (c == ' ') {
+            if (field < 5) field++;
+          } else {
+            if (id >= 1 && id <= 247 && nlen > 0 && findMotorById((uint8_t)id) < 0) {
+              motors[motorCount].id = (uint8_t)id;
+              motors[motorCount].name[nlen] = '\0';
+              motors[motorCount].calibrated = cal;
+              motors[motorCount].homeOffsetPulses = offs;
+              motors[motorCount].maxTravelCounts = trav;
+              motors[motorCount].lastStopCmd = last;
+              motorCount++;
+            }
+            id = 0; nlen = 0; field = 0; cal = 0;
+            offs = 0; trav = 0; last = 0;
+          }
+        } else if (field == 0) {
+          if (c >= '0' && c <= '9') id = id * 10 + (c - '0');
+        } else if (field == 1) {
+          if (nlen < 10) motors[motorCount].name[nlen++] = c;
+        } else {
+          if (c == '-') neg = true;
+          else if (c >= '0' && c <= '9') num = num * 10 + (c - '0');
+        }
+      }
+      f.close();
+    }
+  }
+  if (motorCount == 0) {        // first boot (or no SD): seed a default entry
+    memset(&motors[0], 0, sizeof(MotorEntry));
+    motors[0].id = 1;
+    strcpy(motors[0].name, "Motor1");
+    motorCount = 1;
+    saveMotors();
+  }
+  MB_SLAVE_ID = motors[0].id;   // boot selection = first registered motor
+  Serial.print(F("motors="));
+  Serial.print(motorCount);
+  Serial.print(F(" act="));
+  Serial.println(MB_SLAVE_ID);
 }
 
 bool readFeedbackPosition() {
@@ -667,25 +904,6 @@ bool readFeedbackPosition() {
   return true;
 }
 
-const char *motorStateText() {
-  switch (motorState) {
-    case MOTOR_CW:  return "cw";
-    case MOTOR_CCW: return "ccw";
-    default:        return "stopped";
-  }
-}
-
-const char *homingStateText() {
-  switch (homingState) {
-    case H_PASS1:       return "pass1";
-    case H_PASS2_START:
-    case H_PASS2:       return "pass2";
-    case H_DONE:        return "done";
-    case H_ERROR:       return "error";
-    default:            return "idle";
-  }
-}
-
 // One-time motor link configuration, run LAZILY on the first JOG or homing
 // request (V1.0.3 behavior: initialize once, then leave the link alone).
 // Sequence per the drive operating procedure: ENABLE RS485 control first
@@ -699,15 +917,15 @@ bool setupMotorJog() {
   uint8_t rAccel  = mbWriteConfigRegister(REG_JOG_ACCEL, JOG_ACCEL_VALUE);
   recordModbusResult(rAccel);
 
-  Serial.print(F("Motor config: enable=0x"));
+  Serial.print(F("cfg en=0x"));
   Serial.print(rEnable, HEX);
-  Serial.print(F(" jog_speed=0x"));
+  Serial.print(F(" sp=0x"));
   Serial.print(rSpeed, HEX);
-  Serial.print(F(" jog_accel=0x"));
+  Serial.print(F(" ac=0x"));
   Serial.println(rAccel, HEX);
   if (rSpeed == MB_OK) jogSpeedWritten = motorSpeedRpm;
   if (rSpeed != MB_OK || rAccel != MB_OK) {
-    Serial.println(F("WARN: JOG cfg write failed"));
+    Serial.println(F("WARN cfg"));
   }
   return (rEnable == MB_OK);
 }
@@ -724,7 +942,7 @@ void commandJog(MotorState dir) {
     if (rs == MB_OK) {
       jogSpeedWritten = motorSpeedRpm;
     } else {
-      Serial.println(F("WARN: jog speed write failed, old speed in use"));
+      Serial.println(F("WARN spd wr"));
     }
   }
   if (motorState != dir) {
@@ -766,6 +984,20 @@ void servicePositionPoll() {
   if (now - lastPositionPoll < POSITION_POLL_MS) return;
   lastPositionPoll = now;
   readFeedbackPosition();
+
+  // Bus voltage (Pr4.27, 0.1 V) every 3rd idle tick (~3 s). The iCL-RS has
+  // no temperature register: this is the drive's only live health readout.
+  static uint8_t vbusTick = 0;
+  if (++vbusTick >= 3) {
+    vbusTick = 0;
+    uint16_t v;
+    uint8_t rc = mbReadRetry(REG_BUS_VOLTAGE, 1, &v);
+    recordModbusResult(rc);
+    if (rc == MB_OK) {
+      busVoltageRaw = v;
+      busVoltageValid = true;
+    }
+  }
 }
 
 // ================= TORQUE HOMING (STEP 1) =================
@@ -831,16 +1063,7 @@ void startHoming() {
   homingError = 0;
   homingStartMs = millis();
   lastHomingPoll = homingStartMs;
-  Serial.println(F("Homing 1/2: CW to far stop"));
-}
-
-// Reads the feedback position with up to 3 attempts. Used at each pass end.
-static bool readPositionRetry3() {
-  for (uint8_t i = 0; i < 3; i++) {
-    if (readFeedbackPosition()) return true;
-    delay(50);
-  }
-  return false;
+  Serial.println(F("H1/2 CW"));
 }
 
 // Polls the drive motion status (0x1003) every 200 ms while a homing pass
@@ -877,7 +1100,7 @@ void serviceHoming() {
     homingState = H_PASS2;
     homingStartMs = now;
     lastHomingPoll = now;
-    Serial.println(F("Homing 2/2: CCW across axis"));
+    Serial.println(F("H2/2 CCW"));
     return;
   }
 
@@ -905,14 +1128,14 @@ void serviceHoming() {
 
   if (homingState == H_PASS1) {
     // CW (far) hard stop reached: capture the pass-1 reference position.
-    if (!readPositionRetry3()) {
+    if (!readFeedbackPosition()) {       // mbReadRetry inside: 3 attempts
       homingState = H_ERROR;
       homingError = 6;
       Serial.println(F("Homing ERR 6 (p1)"));
       return;
     }
     pass1OffsetRaw = feedbackPositionPulses;
-    Serial.print(F("Pass 1 done. Raw ref: "));
+    Serial.print(F("P1 ref: "));
     Serial.println(pass1OffsetRaw);
     homingState = H_PASS2_START;
     homingStartMs = now;             // dwell reference
@@ -921,7 +1144,7 @@ void serviceHoming() {
 
   // PASS 2 done: CCW (near) hard stop reached.
   // 1) BEFORE setting the final zero: measure the travel vs the pass-1 ref.
-  if (!readPositionRetry3()) {
+  if (!readFeedbackPosition()) {         // mbReadRetry inside: 3 attempts
     homingState = H_ERROR;
     homingError = 6;
     Serial.println(F("Homing ERR 6 (p2)"));
@@ -931,9 +1154,9 @@ void serviceHoming() {
   // counts * 500 / 65536 in pure 32-bit (counts is positive here)
   int32_t mmCenti = (int32_t)(((maxTravelCounts >> 16) * 500L)
                   + ((((uint32_t)maxTravelCounts & 0xFFFFUL) * 500UL) >> 16));
-  Serial.print(F("Max travel: "));
+  Serial.print(F("Travel: "));
   Serial.print(maxTravelCounts);
-  Serial.print(F(" cnt = "));
+  Serial.print(F("c="));
   Serial.print(mmCenti / 100);
   Serial.print(F("."));
   if ((mmCenti % 100) < 10) Serial.print(F("0"));
@@ -955,33 +1178,15 @@ void serviceHoming() {
   homeOffsetPulses = feedbackPositionPulses;
   homed = true;
   homingState = H_DONE;
-  Serial.print(F("Homing DONE. Raw offset: "));
+  Serial.print(F("Homed. offs="));
   Serial.println(homeOffsetPulses);
   lastPositionPoll = millis();
 
-  // 4) Soft limits: Limit 1 = +10 mm, Limit 2 = max travel - 10 mm.
-  int32_t travelCmd = countsToCmdPulses(maxTravelCounts);
-  if (travelCmd > 2L * LIMIT_MARGIN_CMD) {
-    limit1Cmd = LIMIT_MARGIN_CMD;
-    limit2Cmd = travelCmd - LIMIT_MARGIN_CMD;
-    limitsActive = true;
-    Serial.print(F("Limits(cmd): L1="));
-    Serial.print(limit1Cmd);
-    Serial.print(F(" L2="));
-    Serial.println(limit2Cmd);
-  } else {
-    limitsActive = false;
-    Serial.println(F("WARN: travel<=20mm, no limits"));
-  }
-}
-
-const char *moveStateText() {
-  switch (moveState) {
-    case M_MOVING: return "moving";
-    case M_DONE:   return "done";
-    case M_ERROR:  return "error";
-    default:       return "idle";
-  }
+  // 4) Soft limits + persist this motor's calibration in the registry.
+  applyLimitsFromTravel();
+  homedRestored = false;               // measured this session, not restored
+  snapshotActiveMotor();
+  saveMotors();
 }
 
 // ================= GO TO POSITION (PR0 RELATIVE MOVE) =================
@@ -1014,9 +1219,7 @@ void startMove(int32_t targetHomedPulses, uint16_t speedRpm, uint8_t guardLimit)
   int32_t delta = targetHomedPulses - currentCmdPulses;
   moveTargetHomed = targetHomedPulses;
 
-  Serial.print(guardLimit == 1 ? F("G-CCW: tgt=")
-             : guardLimit == 2 ? F("G-CW: tgt=")
-                               : F("Goto: tgt="));
+  Serial.print(F("tgt="));
   Serial.print(targetHomedPulses);
   Serial.print(F(" cur="));
   Serial.print(currentCmdPulses);
@@ -1063,9 +1266,7 @@ void startMove(int32_t targetHomedPulses, uint16_t speedRpm, uint8_t guardLimit)
   moveError = 0;
   moveStartMs = millis();
   lastMovePoll = moveStartMs;
-  Serial.println(guardLimit == 1 ? F("G-CCW -> L1 started")
-               : guardLimit == 2 ? F("G-CW -> L2 started")
-                                 : F("PR0 move started"));
+  Serial.println(F("mv start"));
 }
 
 // Polls the drive while a /goto move runs. ONE read per cycle: motion status
@@ -1095,12 +1296,12 @@ void serviceMove() {
     moveState = M_DONE;
     if (moveGuardLimit == 1) {
       limit1Hit = true;                  // reached Limit 1 with the button held
-      Serial.println(F("G-CCW DONE: at L1"));
+      Serial.println(F("at L1"));
     } else if (moveGuardLimit == 2) {
       limit2Hit = true;                  // reached Limit 2 with the button held
-      Serial.println(F("G-CW DONE: at L2"));
+      Serial.println(F("at L2"));
     } else {
-      Serial.print(F("Move DONE (st=0x"));
+      Serial.print(F("mv done st=0x"));
       Serial.print(st, HEX);
       Serial.println(F(")"));
     }
@@ -1111,28 +1312,10 @@ void serviceMove() {
 
 void sendMotorOkResponse(EthernetClient client) {
   httpHeader(client, 200, CT_JSON);
-  client.print(F("{\"motor_state\":\""));
-  client.print(motorStateText());
-  client.print(F("\"}"));
+  client.print(F("{\"ms\":"));
+  client.print((uint8_t)motorState);
+  client.println(F("}"));
   client.println();
-}
-
-void sendHomingStatusResponse(EthernetClient client) {
-  httpHeader(client, 200, CT_JSON);
-  client.print(F("{\"homing_state\":\""));
-  client.print(homingStateText());
-  client.print(F("\",\"homing_error\":"));
-  client.print(homingError);
-  client.println(F("}"));
-}
-
-void sendMoveStatusResponse(EthernetClient client) {
-  httpHeader(client, 200, CT_JSON);
-  client.print(F("{\"move_state\":\""));
-  client.print(moveStateText());
-  client.print(F("\",\"move_error\":"));
-  client.print(moveError);
-  client.println(F("}"));
 }
 
 // Generic 409 used for every "request rejected" case (homing in progress,
@@ -1159,9 +1342,9 @@ void handleClient(EthernetClient client) {
     sendStatusResponse(client);
   } else if (strstr(request, "GET /cw ")) {
     if (homingBusy()) {
-      sendBusyResponse(client, F("homing_in_progress"));
+      sendBusyResponse(client, F("homing"));
     } else if (moveState == M_MOVING) {
-      sendBusyResponse(client, F("move_in_progress"));
+      sendBusyResponse(client, F("moving"));
     } else if (homed && limitsActive) {
       // GUARDED CW: bounded PR0 move whose target IS Limit 2 - it can never
       // go above it, and if the motor is already at/beyond Limit 2 it moves
@@ -1170,7 +1353,7 @@ void handleClient(EthernetClient client) {
       limit1Hit = false;
       limit2Hit = false;
       startMove(limit2Cmd, motorSpeedRpm, 2);
-      sendMoveStatusResponse(client);     // page sees move_state + move_guard
+      sendOkResponse(client);             // page detects guard via "ok"
     } else {
       limit1Hit = false;                  // new motion command acknowledges the flags
       limit2Hit = false;
@@ -1179,9 +1362,9 @@ void handleClient(EthernetClient client) {
     }
   } else if (strstr(request, "GET /ccw ")) {
     if (homingBusy()) {
-      sendBusyResponse(client, F("homing_in_progress"));
+      sendBusyResponse(client, F("homing"));
     } else if (moveState == M_MOVING) {
-      sendBusyResponse(client, F("move_in_progress"));
+      sendBusyResponse(client, F("moving"));
     } else if (homed && limitsActive) {
       // GUARDED CCW: bounded PR0 move whose target IS Limit 1 - it can never
       // go below it, and if the motor is already at/below Limit 1 it moves
@@ -1190,7 +1373,7 @@ void handleClient(EthernetClient client) {
       limit1Hit = false;
       limit2Hit = false;
       startMove(limit1Cmd, motorSpeedRpm, 1);
-      sendMoveStatusResponse(client);     // page sees move_state + move_guard
+      sendOkResponse(client);             // page detects guard via "ok"
     } else {
       limit1Hit = false;
       limit2Hit = false;
@@ -1204,7 +1387,7 @@ void handleClient(EthernetClient client) {
     if (wasHoming) {
       homingState = H_ERROR;
       homingError = 5;
-      Serial.println(F("Homing aborted (Stop)"));
+      Serial.println(F("H abort"));
     }
     if (wasMoving) {
       if (moveGuardLimit != 0) {
@@ -1213,7 +1396,7 @@ void handleClient(EthernetClient client) {
       } else {
         moveState = M_ERROR;
         moveError = 3;
-        Serial.println(F("Move aborted (Stop)"));
+        Serial.println(F("mv abort"));
       }
     }
     if (!wasHoming && !wasMoving) {
@@ -1223,50 +1406,121 @@ void handleClient(EthernetClient client) {
     sendMotorOkResponse(client);
   } else if (strstr(request, "GET /home ")) {
     if (moveState == M_MOVING) {
-      sendBusyResponse(client, F("move_in_progress"));
+      sendBusyResponse(client, F("moving"));
     } else {
       startHoming();           // no-op if already homing
-      sendHomingStatusResponse(client);
+      sendOkResponse(client);
     }
   } else if (strstr(request, "GET /goto?p=")) {
     if (homingBusy()) {
-      sendBusyResponse(client, F("homing_in_progress"));
+      sendBusyResponse(client, F("homing"));
     } else if (moveState == M_MOVING) {
-      sendBusyResponse(client, F("move_in_progress"));
+      sendBusyResponse(client, F("moving"));
     } else if (motorState != MOTOR_STOPPED) {
-      sendBusyResponse(client, F("jog_active"));
+      sendBusyResponse(client, F("jog"));
     } else if (!homed) {
-      sendBusyResponse(client, F("not_homed"));
+      sendBusyResponse(client, F("unhomed"));
     } else {
       long target = atol(strstr(request, "?p=") + 3);   // homed frame, cmd pulses
       if (limitsActive &&
           ((int32_t)target < limit1Cmd || (int32_t)target > limit2Cmd)) {
-        sendBusyResponse(client, F("out_of_limits"));
+        sendBusyResponse(client, F("limits"));
       } else {
         limit1Hit = false;
         limit2Hit = false;
         startMove((int32_t)target, motorSpeedRpm, 0);
-        sendMoveStatusResponse(client);
+        sendOkResponse(client);
       }
     }
   } else if (strstr(request, "GET /speed?v=")) {
     long v = atol(strstr(request, "?v=") + 3);
-    if (homingBusy()) {
-      sendBusyResponse(client, F("homing_in_progress"));
-    } else if (moveState == M_MOVING) {
-      sendBusyResponse(client, F("move_in_progress"));
-    } else if (motorState != MOTOR_STOPPED) {
-      sendBusyResponse(client, F("jog_active"));
+    if (rejectIfBusy(client)) {
     } else if (v < SPEED_MIN_RPM || v > SPEED_MAX_RPM) {
-      sendBusyResponse(client, F("speed_out_of_range"));
+      sendBusyResponse(client, F("range"));
     } else {
       motorSpeedRpm = (uint16_t)v;     // applied at the next JOG / move
-      Serial.print(F("Speed set: "));
+      Serial.print(F("spd="));
       Serial.println(motorSpeedRpm);
-      httpHeader(client, 200, CT_JSON);
-      client.print(F("{\"speed_rpm\":"));
-      client.print(motorSpeedRpm);
-      client.println(F("}"));
+      sendOkResponse(client);
+    }
+  } else if (strstr(request, "GET /msel?i=")) {
+    if (!rejectIfBusy(client)) {
+      long id = atol(strstr(request, "?i=") + 3);
+      int8_t idx = (id >= 1 && id <= 247) ? findMotorById((uint8_t)id) : -1;
+      if (idx < 0) {
+        sendBusyResponse(client, F("noid"));
+      } else {
+        if ((uint8_t)id != MB_SLAVE_ID) {
+          snapshotActiveMotor();         // keep cal + LAST STOP POSITION
+          MB_SLAVE_ID = (uint8_t)id;
+          resetPerMotorState();          // new drive = new frame by default
+          if (motors[idx].calibrated) {
+            restoreMotorFrame(idx);      // goto stays available ("hr":1)
+          }
+          saveMotors();
+          Serial.print(F("sel "));
+          Serial.print(motors[idx].name);
+          Serial.print(F(" ID "));
+          Serial.println(MB_SLAVE_ID);
+        } else if (!homed && motors[idx].calibrated) {
+          restoreMotorFrame(idx);        // Arduino rebooted, drive stayed on
+        }
+        sendOkResponse(client);
+      }
+    }
+  } else if (strstr(request, "GET /madd?i=")) {
+    if (!rejectIfBusy(client)) {
+      long id = atol(strstr(request, "?i=") + 3);
+      char *pn = strstr(request, "&n=");
+      char nm[11];
+      uint8_t nlen = 0;
+      if (pn) {
+        pn += 3;
+        while (nlen < 10 && *pn) {
+          char c = *pn++;
+          bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                    (c >= '0' && c <= '9') || c == '_' || c == '-';
+          if (!ok) break;
+          nm[nlen++] = c;
+        }
+      }
+      nm[nlen] = '\0';
+      if (id < 1 || id > 247) {
+        sendBusyResponse(client, F("id"));
+      } else if (nlen == 0) {
+        sendBusyResponse(client, F("name"));
+      } else if (findMotorById((uint8_t)id) >= 0) {
+        sendBusyResponse(client, F("dup"));
+      } else if (motorCount >= MAX_MOTORS) {
+        sendBusyResponse(client, F("full"));
+      } else {
+        motors[motorCount].id = (uint8_t)id;
+        strcpy(motors[motorCount].name, nm);
+        motorCount++;
+        saveMotors();
+        Serial.print(F("add "));
+        Serial.print(nm);
+        Serial.print(F(" ID "));
+        Serial.println((uint8_t)id);
+        sendOkResponse(client);
+      }
+    }
+  } else if (strstr(request, "GET /mdel?i=")) {
+    if (!rejectIfBusy(client)) {
+      long id = atol(strstr(request, "?i=") + 3);
+      int8_t idx = (id >= 1 && id <= 247) ? findMotorById((uint8_t)id) : -1;
+      if (idx < 0) {
+        sendBusyResponse(client, F("noid"));
+      } else if ((uint8_t)id == MB_SLAVE_ID) {
+        sendBusyResponse(client, F("active"));   // select another one first
+      } else {
+        for (uint8_t k = idx; k + 1 < motorCount; k++) motors[k] = motors[k + 1];
+        motorCount--;
+        saveMotors();
+        Serial.print(F("del ID "));
+        Serial.println((uint8_t)id);
+        sendOkResponse(client);
+      }
     }
   } else if (strstr(request, "GET /hwstatus ")) {
     sendHWStatusResponse(client);
@@ -1282,49 +1536,77 @@ void sendStatusResponse(EthernetClient client) {
   // No Modbus access here: position is cached, refreshed by the 1 Hz
   // background poll (motor stopped, no homing) and on /stop.
   httpHeader(client, 200, CT_JSON);
-  client.print(F("{\"uptime\":"));
+  // V1.2.0 flash diet round 2: SHORT KEYS, booleans as 1/0, states as raw
+  // enum numbers. The page translates once in refreshStatus() (shim), the
+  // rest of its logic is unchanged. Mapping (old -> new):
+  //   uptime>up fp=homed feedback_position, h=homed, fv=pos valid, mr/mt/mto
+  //   =modbus result/ms/timeouts, sp=speed, si=slave, vb=vbus, mo=motors,
+  //   hs/he=homing state(enum)/error, mx=max travel, la l1 l2 h1 h2=limits,
+  //   mg gl=guard, mvs mve=move state(enum)/error, ms=motor state(enum).
+  client.print(F("{\"up\":"));
   client.print(millis());
-  client.print(F(",\"feedback_position\":"));
+  client.print(F(",\"fp\":"));
   client.print(feedbackPositionPulses - homeOffsetPulses);  // HOMED frame
-  client.print(F(",\"homed\":"));
-  client.print(homed ? F("true") : F("false"));
-  client.print(F(",\"feedback_position_valid\":"));
-  client.print(feedbackPositionValid ? F("true") : F("false"));
-  client.print(F(",\"last_modbus_result\":"));
+  client.print(F(",\"h\":"));
+  client.print((uint8_t)homed);
+  client.print(F(",\"hr\":"));
+  client.print((uint8_t)homedRestored);
+  client.print(F(",\"fv\":"));
+  client.print((uint8_t)feedbackPositionValid);
+  client.print(F(",\"mr\":"));
   client.print(lastModbusResult);
-  client.print(F(",\"last_modbus_ms\":"));
+  client.print(F(",\"mt\":"));
   client.print(lastModbusMs);
-  client.print(F(",\"modbus_timeouts\":"));
+  client.print(F(",\"mto\":"));
   client.print(mbTimeouts);
-  client.print(F(",\"speed_rpm\":"));
+  client.print(F(",\"sp\":"));
   client.print(motorSpeedRpm);
-  client.print(F(",\"homing_state\":\""));
-  client.print(homingStateText());
-  client.print(F("\",\"homing_error\":"));
+  client.print(F(",\"si\":"));
+  client.print(MB_SLAVE_ID);
+  client.print(F(",\"vb\":"));
+  client.print(busVoltageValid ? busVoltageRaw : 0);
+  client.print(F(",\"mo\":["));
+  for (uint8_t k = 0; k < motorCount; k++) {
+    if (k) client.print(',');
+    client.print(F("{\"i\":"));
+    client.print(motors[k].id);
+    client.print(F(",\"n\":\""));
+    client.print(motors[k].name);
+    client.print(F("\",\"c\":"));
+    client.print(motors[k].calibrated);
+    client.print(F(",\"x\":"));
+    client.print(motors[k].maxTravelCounts);
+    client.print(F(",\"p\":"));
+    client.print(motors[k].lastStopCmd);
+    client.print('}');
+  }
+  client.print(']');
+  client.print(F(",\"hs\":"));
+  client.print((uint8_t)homingState);
+  client.print(F(",\"he\":"));
   client.print(homingError);
-  client.print(F(",\"max_travel_counts\":"));
+  client.print(F(",\"mx\":"));
   client.print(maxTravelCounts);
-  client.print(F(",\"limits_active\":"));
-  client.print(limitsActive ? F("true") : F("false"));
-  client.print(F(",\"limit1_cmd\":"));
+  client.print(F(",\"la\":"));
+  client.print((uint8_t)limitsActive);
+  client.print(F(",\"l1\":"));
   client.print(limit1Cmd);
-  client.print(F(",\"limit2_cmd\":"));
+  client.print(F(",\"l2\":"));
   client.print(limit2Cmd);
-  client.print(F(",\"limit1_hit\":"));
-  client.print(limit1Hit ? F("true") : F("false"));
-  client.print(F(",\"limit2_hit\":"));
-  client.print(limit2Hit ? F("true") : F("false"));
-  client.print(F(",\"move_guard\":"));
-  client.print(moveGuardLimit != 0 ? F("true") : F("false"));
-  client.print(F(",\"guard_limit\":"));
+  client.print(F(",\"h1\":"));
+  client.print((uint8_t)limit1Hit);
+  client.print(F(",\"h2\":"));
+  client.print((uint8_t)limit2Hit);
+  client.print(F(",\"mg\":"));
+  client.print((uint8_t)(moveGuardLimit != 0));
+  client.print(F(",\"gl\":"));
   client.print(moveGuardLimit);
-  client.print(F(",\"move_state\":\""));
-  client.print(moveStateText());
-  client.print(F("\",\"move_error\":"));
+  client.print(F(",\"mvs\":"));
+  client.print((uint8_t)moveState);
+  client.print(F(",\"mve\":"));
   client.print(moveError);
-  client.print(F(",\"motor_state\":\""));
-  client.print(motorStateText());
-  client.print(F("\""));
+  client.print(F(",\"ms\":"));
+  client.print((uint8_t)motorState);
   client.println(F("}"));
 }
 
@@ -1410,6 +1692,7 @@ void setup() {
   checkSDCardStatus();             // single FAT mount, sets sdReady
   printHardwareReport(Serial, ethStatus);
   createtxt(ethStatus);
+  loadMotors();                    // motor registry (motors.txt) + active slave
 
   // Motor link configuration (RS485 enable + JOG speed/accel) is done ONCE,
   // lazily, on the first JOG or homing request - V1.0.3 behavior.
