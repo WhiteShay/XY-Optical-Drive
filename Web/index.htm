@@ -2,13 +2,11 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>XY Optical Drive V1.0.1</title>
+  <title>XY Optical Drive V1.0.9</title>
 </head>
 <body style="font-family:Arial, sans-serif; padding:16px; background-color:#1e1e1e; color:#e0e0e0;">
   <h1>XY Optical Drive</h1>
-  <p><strong>Version:</strong> V1.0.1</p>
-  <p>Page generated directly by firmware.</p>
-  <p>API status endpoint: <a href="/status">/status</a></p>
+  <p><strong>Version:</strong> V1.0.9</p>
   <p><em>Uptime: <span id="uptime">...</span></em></p>
 
   <hr>
@@ -20,28 +18,43 @@
   <style>
     .mb { font-size:1.2em; padding:10px 20px; border:none; border-radius:6px; cursor:pointer; background:#2d2d2d; color:#e0e0e0; margin-right:4px; border:1px solid #404040; user-select:none; -webkit-user-select:none; touch-action:manipulation; }
     .mb:hover { background:#3a3a3a; }
+    .mb:disabled { opacity:.4; cursor:default; }
+    .mb:disabled:hover { background:#2d2d2d; }
     .mb.jog.pressed { background:#4CAF50; color:white; border-color:#4CAF50; }
     .mb.stop.armed { background:#4CAF50; color:white; border-color:#4CAF50; }
+    .mb.home { border-color:#7a5c00; }
+    .mb.home.busy { background:#7a5c00; color:#fff; border-color:#b58900; }
+    .mb.go { border-color:#1565c0; }
+    .mb.go.busy { background:#1565c0; color:#fff; border-color:#42a5f5; }
+    .posin { font-size:1.2em; padding:10px; width:7em; border-radius:6px; border:1px solid #404040; background:#2d2d2d; color:#e0e0e0; margin-right:4px; }
+    .posin:disabled { opacity:.4; }
   </style>
   <div style="margin:12px 0;">
     <button id="b-ccw" class="mb jog">&#9664; CCLKW</button>
     <button id="b-stop" class="mb stop" onclick="cmdStop()">&#9646;&#9646; Stop</button>
     <button id="b-cw" class="mb jog">CLKW &#9654;</button>
   </div>
+  <div style="margin:12px 0;">
+    <input id="i-goto" class="posin" type="number" step="0.01" min="0" placeholder="mm" disabled>
+    <button id="b-goto" class="mb go" onclick="cmdGoto()" disabled>Go to position</button>
+  </div>
   <p id="ms">Status: stopped</p>
+  <p id="move" style="color:#9e9e9e;">Go to: requires homing</p>
   <p id="pos" style="font-size:1.1em;">Position: ...</p>
   <p id="mdetail" style="color:#9e9e9e; font-size:0.9em;">Modbus: idle</p>
-  <p style="color:#9e9e9e; font-size:0.85em;">
-    Hold CLKW / CCLKW to jog at 100 rpm; release to stop. One request latches the
-    jog, /stop ends it (no watchdog: if a stop request fails, the motor keeps
-    running - press Stop again). Position is read from the drive only while the
-    motor is stopped (1 s refresh) and stays frozen during a jog.
-    Lead screw: 5 mm/rev, 10000 pulses/rev &mdash; CLKW &#9654; +mm, CCLKW &#9664; &minus;mm
-  </p>
+
+  <hr>
+  <h2>Calibration (Torque Homing)</h2>
+  <div style="margin:12px 0;">
+    <button id="b-home" class="mb home" onclick="cmdHome()">&#8634; Start homing</button>
+  </div>
+  <p id="homing">Homing: not started</p>
+  <p id="maxlen" style="font-size:1.1em;">Max length: &mdash;</p>
 
   <script>
     var CFG = {
-      pulsesPerRev: 10000,
+      cmdPulsesPerRev: 10000,        // PR / "go to" command unit (drive Pr0.08)
+      feedbackCountsPerRev: 65536,   // feedback register 0x1014/0x1015 unit (field-derived)
       screwPitchMm: 5.0,
       cwIncreasesMm: 1
     };
@@ -53,17 +66,44 @@
       ccw: 'Running CCLKW',
       stopped: 'Stopped'
     };
+
+    var HOMING_ERRORS = {
+      1: 'config write failed (speeds/direction, Modbus, after 3 attempts)',
+      2: 'homing trigger write failed (Modbus, after 3 attempts)',
+      3: 'zero-set write failed (Modbus, after 3 attempts)',
+      4: 'drive fault (alarm) during homing',
+      5: 'aborted by Stop (emergency stop)',
+      6: 'position read failed after homing - run the homing again'
+    };
+
+    var MOVE_ERRORS = {
+      1: 'PR0 config/trigger write failed (Modbus)',
+      2: 'drive fault (alarm) during the move',
+      3: 'aborted by Stop (emergency stop)',
+      4: 'position read failed before the move'
+    };
+
     var motorState = 'stopped';
     var lastStatus = null;
     var holdActive = false;
     var stopArmed = false;       // true after pressing Stop, cleared by the next jog press
+    var homingActive = false;
+    var moveActive = false;
+    var isHomed = false;
+    var lastGotoMm = null;       // target of the last requested move, for display
 
-    function signedPulsesForDisplay(pulses) {
-      return pulses * CFG.cwIncreasesMm;
+    function signedCountsForDisplay(counts) {
+      return counts * CFG.cwIncreasesMm;
     }
 
-    function pulsesToMm(pulses) {
-      return signedPulsesForDisplay(pulses) * CFG.screwPitchMm / CFG.pulsesPerRev;
+    function countsToMm(counts) {
+      // Feedback register unit: 65536 counts per motor revolution.
+      return signedCountsForDisplay(counts) * CFG.screwPitchMm / CFG.feedbackCountsPerRev;
+    }
+
+    function mmToCmdPulses(mm) {
+      // Command unit for GET /goto?p= : 10000 pulses per revolution (Pr0.08).
+      return Math.round(mm * CFG.cmdPulsesPerRev / CFG.screwPitchMm) * CFG.cwIncreasesMm;
     }
 
     function formatMm(mm) {
@@ -85,11 +125,15 @@
       updateButtonColors();
 
       if (lastStatus && lastStatus.feedback_position_valid) {
-        var pulses = lastStatus.feedback_position;
-        var mm = pulsesToMm(pulses);
-        var suffix = (motorState !== 'stopped') ? ' \u2014 frozen while jogging' : '';
+        var counts = lastStatus.feedback_position;   // HOMED frame, feedback counts
+        var mm = countsToMm(counts);
+        var suffix = '';
+        if (homingActive) suffix = ' \u2014 frozen while homing';
+        else if (moveActive) suffix = ' \u2014 frozen while moving';
+        else if (motorState !== 'stopped') suffix = ' \u2014 frozen while jogging';
+        if (!isHomed && !homingActive) suffix += ' (not homed)';
         document.getElementById('pos').textContent =
-          'Position: ' + formatMm(mm) + ' mm (' + signedPulsesForDisplay(pulses) + ' pulses)' + suffix;
+          'Position: ' + formatMm(mm) + ' mm (' + signedCountsForDisplay(counts) + ' counts)' + suffix;
         document.getElementById('mdetail').textContent =
           'Modbus result=' + lastStatus.last_modbus_result +
           ', last_tx=' + lastStatus.last_modbus_ms + ' ms' +
@@ -100,6 +144,86 @@
           'Modbus result=' + lastStatus.last_modbus_result +
           ', last_tx=' + lastStatus.last_modbus_ms + ' ms' +
           ', mb-timeouts=' + lastStatus.modbus_timeouts;
+      }
+    }
+
+    function setMotionButtonsEnabled(enabled) {
+      document.getElementById('b-cw').disabled = !enabled;
+      document.getElementById('b-ccw').disabled = !enabled;
+      document.getElementById('b-home').disabled = !enabled;
+      // Go-to is additionally gated on a completed homing.
+      document.getElementById('b-goto').disabled = !enabled || !isHomed;
+      document.getElementById('i-goto').disabled = !enabled || !isHomed;
+    }
+
+    function updateHomingUi(d) {
+      var st = d.homing_state || 'idle';
+      var el = document.getElementById('homing');
+      var busy = (st === 'pass1' || st === 'pass2');
+
+      homingActive = busy;
+      document.getElementById('b-home').classList.toggle('busy', busy);
+
+      if (st === 'pass1') {
+        el.textContent = 'Homing pass 1/2 \u2014 CW toward the far hard stop at 200 rpm... (Stop = abort)';
+        el.style.color = '#b58900';
+      } else if (st === 'pass2') {
+        el.textContent = 'Homing pass 2/2 \u2014 CCW across the axis at 200 rpm... (Stop = abort)';
+        el.style.color = '#b58900';
+      } else if (st === 'done') {
+        el.textContent = 'Homing OK \u2014 zero set at the CCW hard stop';
+        el.style.color = '#4CAF50';
+      } else if (st === 'error') {
+        var code = d.homing_error || 0;
+        el.textContent = 'Homing FAILED (code ' + code + '): ' +
+          (HOMING_ERRORS[code] || 'unknown error');
+        el.style.color = '#e57373';
+      } else {
+        el.textContent = 'Homing: not started';
+        el.style.color = '';
+      }
+
+      // Max length: measured during pass 2, BEFORE the final zero-set.
+      var ml = document.getElementById('maxlen');
+      if (d.max_travel_counts > 0) {
+        var mlMm = Math.abs(countsToMm(d.max_travel_counts));
+        ml.textContent = 'Max length: ' + mlMm.toFixed(2) + ' mm (' +
+          d.max_travel_counts + ' counts)';
+        ml.style.color = '#4CAF50';
+      } else {
+        ml.textContent = 'Max length: \u2014';
+        ml.style.color = '';
+      }
+    }
+
+    function updateMoveUi(d) {
+      var st = d.move_state || 'idle';
+      var el = document.getElementById('move');
+      var busy = (st === 'moving');
+
+      moveActive = busy;
+      document.getElementById('b-goto').classList.toggle('busy', busy);
+
+      if (!isHomed) {
+        el.textContent = 'Go to: requires homing';
+        el.style.color = '#9e9e9e';
+      } else if (busy) {
+        el.textContent = 'Go to: moving' +
+          (lastGotoMm !== null ? ' to ' + formatMm(lastGotoMm) + ' mm' : '') +
+          '... (Stop = abort)';
+        el.style.color = '#42a5f5';
+      } else if (st === 'done') {
+        el.textContent = 'Go to: done' +
+          (lastGotoMm !== null ? ' \u2014 target ' + formatMm(lastGotoMm) + ' mm' : '');
+        el.style.color = '#4CAF50';
+      } else if (st === 'error') {
+        var code = d.move_error || 0;
+        el.textContent = 'Go to FAILED (code ' + code + '): ' +
+          (MOVE_ERRORS[code] || 'unknown error');
+        el.style.color = '#e57373';
+      } else {
+        el.textContent = 'Go to: ready (0 mm = CCW hard stop)';
+        el.style.color = '#9e9e9e';
       }
     }
 
@@ -115,10 +239,14 @@
     function refreshStatus() {
       return fetch('/status').then(function(r) { return r.json(); }).then(function(d) {
         lastStatus = d;
+        isHomed = (d.homed === true);
         if (!holdActive && d.motor_state) {
           syncMotorStateFromServer(d.motor_state);
         }
         document.getElementById('uptime').textContent = Math.floor(d.uptime / 1000) + ' s';
+        updateHomingUi(d);
+        updateMoveUi(d);
+        setMotionButtonsEnabled(!homingActive && !moveActive);
         updateMotorUi();
       });
     }
@@ -128,12 +256,20 @@
     });
 
     function startHold(direction) {
+      if (homingActive || moveActive) return;
       if (holdActive && motorState === direction) return;
       holdActive = true;
       stopArmed = false;
       motorState = direction;
       updateMotorUi();
       fetch('/' + direction).then(function(r) { return r.json(); }).then(function(j) {
+        if (j.error) {                   // HTTP 409: homing or move in progress
+          holdActive = false;
+          motorState = 'stopped';
+          clearJogPressed();
+          updateMotorUi();
+          return;
+        }
         if (j.motor_state) syncMotorStateFromServer(j.motor_state);
         updateMotorUi();
       }).catch(function() {
@@ -179,11 +315,76 @@
       });
     }
 
+    function cmdGoto() {
+      if (homingActive || moveActive || !isHomed) return;
+      var mm = parseFloat(document.getElementById('i-goto').value);
+      if (!isFinite(mm) || mm < 0) {
+        document.getElementById('move').textContent =
+          'Go to: enter a position >= 0 mm (0 = CCW hard stop)';
+        document.getElementById('move').style.color = '#e57373';
+        return;
+      }
+      lastGotoMm = mm;
+      var pulses = mmToCmdPulses(mm);
+
+      moveActive = true;
+      setMotionButtonsEnabled(false);
+      document.getElementById('b-goto').classList.add('busy');
+      var el = document.getElementById('move');
+      el.textContent = 'Go to: moving to ' + formatMm(mm) + ' mm... (Stop = abort)';
+      el.style.color = '#42a5f5';
+
+      fetch('/goto?p=' + pulses).then(function(r) { return r.json(); }).then(function(j) {
+        if (j.error) {
+          moveActive = false;
+          el.textContent = 'Go to: rejected (' + j.error + ')';
+          el.style.color = '#e57373';
+        }
+        return refreshStatus();
+      }).catch(function() {
+        moveActive = false;
+        el.textContent = 'Go to: request failed';
+        el.style.color = '#e57373';
+        return refreshStatus();
+      });
+    }
+
+    function cmdHome() {
+      if (homingActive || moveActive) return;
+      var ok = confirm(
+        'Start two-pass torque homing?\n\n' +
+        'Pass 1: the motor runs CW to the FAR hard stop at 200 rpm.\n' +
+        'Pass 2: the motor runs CCW across the WHOLE axis to the near\n' +
+        'hard stop; the max length is measured there, then position 0\n' +
+        'is set at that CCW hard stop.\n\n' +
+        'The Stop button is the ONLY way to abort (no automatic timeout).\n' +
+        'Make sure the axis is free and stay at the controls.');
+      if (!ok) return;
+
+      homingActive = true;
+      setMotionButtonsEnabled(false);
+      document.getElementById('b-home').classList.add('busy');
+      var el = document.getElementById('homing');
+      el.textContent = 'Homing pass 1/2 \u2014 CW toward the far hard stop at 200 rpm... (Stop = abort)';
+      el.style.color = '#b58900';
+
+      fetch('/home').then(function(r) { return r.json(); }).then(function() {
+        return refreshStatus();
+      }).catch(function() {
+        homingActive = false;
+        setMotionButtonsEnabled(true);
+        document.getElementById('b-home').classList.remove('busy');
+        el.textContent = 'Homing: request failed';
+        el.style.color = '#e57373';
+      });
+    }
+
     function bindJogButton(id, direction) {
       var btn = document.getElementById(id);
 
       btn.addEventListener('mousedown', function(e) {
         e.preventDefault();
+        if (homingActive || moveActive) return;
         setJogPressed(id, true);
         startHold(direction);
       });
@@ -198,6 +399,7 @@
       });
       btn.addEventListener('touchstart', function(e) {
         e.preventDefault();
+        if (homingActive || moveActive) return;
         setJogPressed(id, true);
         startHold(direction);
       }, { passive: false });
