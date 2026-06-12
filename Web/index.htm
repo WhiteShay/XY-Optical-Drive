@@ -2,11 +2,11 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>XY Optical Drive V1.0.9</title>
+  <title>XY Optical Drive V1.2.0</title>
 </head>
 <body style="font-family:Arial, sans-serif; padding:16px; background-color:#1e1e1e; color:#e0e0e0;">
   <h1>XY Optical Drive</h1>
-  <p><strong>Version:</strong> V1.0.9</p>
+  <p><strong>Version:</strong> V1.2.0</p>
   <p><em>Uptime: <span id="uptime">...</span></em></p>
 
   <hr>
@@ -29,19 +29,41 @@
     .posin { font-size:1.2em; padding:10px; width:7em; border-radius:6px; border:1px solid #404040; background:#2d2d2d; color:#e0e0e0; margin-right:4px; }
     .posin:disabled { opacity:.4; }
   </style>
+  <div style="display:flex; gap:24px; flex-wrap:wrap; align-items:flex-start;">
+  <div style="flex:1 1 320px; min-width:300px;">
   <div style="margin:12px 0;">
     <button id="b-ccw" class="mb jog">&#9664; CCLKW</button>
     <button id="b-stop" class="mb stop" onclick="cmdStop()">&#9646;&#9646; Stop</button>
     <button id="b-cw" class="mb jog">CLKW &#9654;</button>
   </div>
   <div style="margin:12px 0;">
+    <input id="i-speed" class="posin" type="number" step="1" min="5" max="400" placeholder="rpm">
+    <button id="b-speed" class="mb" onclick="cmdSpeed()">Set speed</button>
+  </div>
+  <div style="margin:12px 0;">
     <input id="i-goto" class="posin" type="number" step="0.01" min="0" placeholder="mm" disabled>
     <button id="b-goto" class="mb go" onclick="cmdGoto()" disabled>Go to position</button>
   </div>
   <p id="ms">Status: stopped</p>
+  <p id="spd" style="color:#9e9e9e;">Speed: &mdash;</p>
   <p id="move" style="color:#9e9e9e;">Go to: requires homing</p>
   <p id="pos" style="font-size:1.1em;">Position: ...</p>
   <p id="mdetail" style="color:#9e9e9e; font-size:0.9em;">Modbus: idle</p>
+  </div>
+
+  <div style="flex:0 0 270px; border:1px solid #404040; border-radius:8px; padding:12px;">
+    <h3 style="margin-top:0;">Motors</h3>
+    <div id="mlist"></div>
+    <div style="margin-top:10px;">
+      <input id="i-mname" class="posin" style="width:6.5em;" maxlength="10" placeholder="name">
+      <input id="i-mid" class="posin" style="width:3.5em;" type="number" min="1" max="247" placeholder="ID">
+    </div>
+    <div style="margin-top:8px;">
+      <button id="b-madd" class="mb" onclick="cmdMotorAdd()">Add motor</button>
+    </div>
+    <p id="mmsg" style="color:#9e9e9e; font-size:0.9em;">Slave ID: 1-31 via DIP switches</p>
+  </div>
+  </div>
 
   <hr>
   <h2>Calibration (Torque Homing)</h2>
@@ -50,6 +72,7 @@
   </div>
   <p id="homing">Homing: not started</p>
   <p id="maxlen" style="font-size:1.1em;">Max length: &mdash;</p>
+  <p id="limits" style="font-size:1.1em;">Limits: &mdash;</p>
 
   <script>
     var CFG = {
@@ -92,6 +115,14 @@
     var isHomed = false;
     var lastGotoMm = null;       // target of the last requested move, for display
 
+    var activeSlaveId = 0;       // currently selected Modbus slave (from /status)
+    var lastMotorsKey = '';      // render cache for the Motors panel
+    var limitsOn = false;        // soft limits active (set by the firmware after homing)
+    var limit1Mm = 0;            // lower limit = 10 mm after 0
+    var limit2Mm = 0;            // upper limit = max length - 10 mm
+    var limit1AlertShown = false; // acknowledgeable pop-up shown for the current limit1_hit
+    var limit2AlertShown = false; // acknowledgeable pop-up shown for the current limit2_hit
+
     function signedCountsForDisplay(counts) {
       return counts * CFG.cwIncreasesMm;
     }
@@ -101,8 +132,12 @@
       return signedCountsForDisplay(counts) * CFG.screwPitchMm / CFG.feedbackCountsPerRev;
     }
 
+    function cmdPulsesToMm(p) {
+      // Command unit: 10000 pulses per revolution (Pr0.08).
+      return p * CFG.cwIncreasesMm * CFG.screwPitchMm / CFG.cmdPulsesPerRev;
+    }
+
     function mmToCmdPulses(mm) {
-      // Command unit for GET /goto?p= : 10000 pulses per revolution (Pr0.08).
       return Math.round(mm * CFG.cmdPulsesPerRev / CFG.screwPitchMm) * CFG.cwIncreasesMm;
     }
 
@@ -120,8 +155,19 @@
       document.getElementById('b-stop').classList.toggle('armed', stopArmed);
     }
 
+    function guardMoving() {
+      return !!(lastStatus && lastStatus.move_guard === true &&
+                lastStatus.move_state === 'moving');
+    }
+
     function updateMotorUi() {
-      document.getElementById('ms').textContent = 'Status: ' + (L[motorState] || motorState);
+      var msText = 'Status: ' + (L[motorState] || motorState);
+      if (guardMoving()) {
+        msText = (lastStatus.guard_limit === 2)
+          ? 'Status: CW guarded (bounded by Limit 2)'
+          : 'Status: CCW guarded (bounded by Limit 1)';
+      }
+      document.getElementById('ms').textContent = msText;
       updateButtonColors();
 
       if (lastStatus && lastStatus.feedback_position_valid) {
@@ -132,8 +178,10 @@
         else if (moveActive) suffix = ' \u2014 frozen while moving';
         else if (motorState !== 'stopped') suffix = ' \u2014 frozen while jogging';
         if (!isHomed && !homingActive) suffix += ' (not homed)';
+        var vb = (lastStatus.vbus > 0)
+          ? ' | Vbus ' + (lastStatus.vbus / 10).toFixed(1) + ' V' : '';
         document.getElementById('pos').textContent =
-          'Position: ' + formatMm(mm) + ' mm (' + signedCountsForDisplay(counts) + ' counts)' + suffix;
+          'Position: ' + formatMm(mm) + ' mm (' + signedCountsForDisplay(counts) + ' counts)' + vb + suffix;
         document.getElementById('mdetail').textContent =
           'Modbus result=' + lastStatus.last_modbus_result +
           ', last_tx=' + lastStatus.last_modbus_ms + ' ms' +
@@ -147,10 +195,14 @@
       }
     }
 
-    function setMotionButtonsEnabled(enabled) {
-      document.getElementById('b-cw').disabled = !enabled;
-      document.getElementById('b-ccw').disabled = !enabled;
+    // keepCcw / keepCw = true while the matching guarded move runs: the held
+    // button must stay enabled, otherwise its mouseup/touchend could be lost.
+    function setMotionButtonsEnabled(enabled, keepCcw, keepCw) {
+      document.getElementById('b-cw').disabled = !enabled && !keepCw;
+      document.getElementById('b-ccw').disabled = !enabled && !keepCcw;
       document.getElementById('b-home').disabled = !enabled;
+      document.getElementById('b-speed').disabled = !enabled;
+      document.getElementById('i-speed').disabled = !enabled;
       // Go-to is additionally gated on a completed homing.
       document.getElementById('b-goto').disabled = !enabled || !isHomed;
       document.getElementById('i-goto').disabled = !enabled || !isHomed;
@@ -194,24 +246,51 @@
         ml.textContent = 'Max length: \u2014';
         ml.style.color = '';
       }
+
+      // Soft limits: Limit 1 = 10 mm after 0, Limit 2 = max length - 10 mm.
+      var lim = document.getElementById('limits');
+      var inp = document.getElementById('i-goto');
+      if (limitsOn) {
+        lim.textContent = 'Limits: ' + limit1Mm.toFixed(2) + ' mm \u2194 ' +
+          limit2Mm.toFixed(2) + ' mm';
+        lim.style.color = '#4CAF50';
+        inp.min = limit1Mm.toFixed(2);
+        inp.max = limit2Mm.toFixed(2);
+      } else {
+        lim.textContent = 'Limits: \u2014';
+        lim.style.color = '';
+        inp.min = 0;
+        inp.removeAttribute('max');
+      }
     }
 
     function updateMoveUi(d) {
       var st = d.move_state || 'idle';
       var el = document.getElementById('move');
       var busy = (st === 'moving');
+      var guard = (d.move_guard === true);
 
       moveActive = busy;
-      document.getElementById('b-goto').classList.toggle('busy', busy);
+      document.getElementById('b-goto').classList.toggle('busy', busy && !guard);
 
       if (!isHomed) {
         el.textContent = 'Go to: requires homing';
         el.style.color = '#9e9e9e';
+      } else if (busy && guard) {
+        el.textContent = (d.guard_limit === 2)
+          ? 'CW guarded: moving toward Limit 2 (' + limit2Mm.toFixed(2) + ' mm)... (release = stop)'
+          : 'CCW guarded: moving toward Limit 1 (' + limit1Mm.toFixed(2) + ' mm)... (release = stop)';
+        el.style.color = '#42a5f5';
       } else if (busy) {
         el.textContent = 'Go to: moving' +
           (lastGotoMm !== null ? ' to ' + formatMm(lastGotoMm) + ' mm' : '') +
           '... (Stop = abort)';
         el.style.color = '#42a5f5';
+      } else if (st === 'done' && guard) {
+        el.textContent = (d.guard_limit === 2)
+          ? 'CW guarded: stopped at Limit 2 (' + limit2Mm.toFixed(2) + ' mm)'
+          : 'CCW guarded: stopped at Limit 1 (' + limit1Mm.toFixed(2) + ' mm)';
+        el.style.color = '#4CAF50';
       } else if (st === 'done') {
         el.textContent = 'Go to: done' +
           (lastGotoMm !== null ? ' \u2014 target ' + formatMm(lastGotoMm) + ' mm' : '');
@@ -222,9 +301,106 @@
           (MOVE_ERRORS[code] || 'unknown error');
         el.style.color = '#e57373';
       } else {
-        el.textContent = 'Go to: ready (0 mm = CCW hard stop)';
+        el.textContent = limitsOn
+          ? 'Go to: ready (' + limit1Mm.toFixed(2) + ' \u2013 ' + limit2Mm.toFixed(2) + ' mm)'
+          : 'Go to: ready (0 mm = CCW hard stop)';
         el.style.color = '#9e9e9e';
       }
+    }
+
+    function renderMotors(d, enabled) {
+      var motors = d.motors || [];
+      var key = JSON.stringify(motors) + '|' + d.slave_id + '|' + (enabled ? 1 : 0);
+      if (key === lastMotorsKey) return;
+      lastMotorsKey = key;
+      var list = document.getElementById('mlist');
+      list.innerHTML = '';
+      for (var k = 0; k < motors.length; k++) {
+        (function(m) {
+          var row = document.createElement('div');
+          row.style.margin = '6px 0';
+          var sel = document.createElement('button');
+          sel.className = 'mb' + (m.i === d.slave_id ? ' jog pressed' : '');
+          sel.style.fontSize = '0.95em';
+          sel.style.padding = '6px 10px';
+          sel.textContent = m.n;
+          sel.disabled = !enabled;
+          sel.onclick = function() { cmdMotorSel(m.i, m.n); };
+          row.appendChild(sel);
+          var idTag = document.createElement('span');
+          idTag.style.color = '#9e9e9e';
+          idTag.style.margin = '0 6px';
+          idTag.textContent = 'ID ' + m.i;
+          row.appendChild(idTag);
+          if (m.i !== d.slave_id) {
+            var del = document.createElement('button');
+            del.className = 'mb';
+            del.style.fontSize = '0.95em';
+            del.style.padding = '6px 10px';
+            del.style.borderColor = '#7a1f1f';
+            del.textContent = '\u2715';
+            del.disabled = !enabled;
+            del.onclick = function() { cmdMotorDel(m.i, m.n); };
+            row.appendChild(del);
+          }
+          list.appendChild(row);
+        })(motors[k]);
+      }
+      document.getElementById('b-madd').disabled = !enabled;
+      document.getElementById('i-mname').disabled = !enabled;
+      document.getElementById('i-mid').disabled = !enabled;
+    }
+
+    function motorMsg(text, isError) {
+      var el = document.getElementById('mmsg');
+      el.textContent = text;
+      el.style.color = isError ? '#e57373' : '#9e9e9e';
+    }
+
+    function cmdMotorSel(id, name) {
+      if (homingActive || moveActive || motorState !== 'stopped') return;
+      if (id === activeSlaveId) return;
+      var ok = confirm('Switch to "' + name + '" (Slave ID ' + id + ')?\n\n' +
+        'Homing, limits and the position reference will be reset:\n' +
+        're-run the homing on the new motor.');
+      if (!ok) return;
+      fetch('/msel?i=' + id).then(function(r) { return r.json(); }).then(function(j) {
+        if (j.error) { motorMsg('Select rejected (' + j.error + ')', true); return; }
+        motorMsg('Active motor: ' + name + ' (ID ' + id + ')', false);
+        return refreshStatus();
+      }).catch(function() { motorMsg('Select request failed', true); });
+    }
+
+    function cmdMotorAdd() {
+      if (homingActive || moveActive || motorState !== 'stopped') return;
+      var name = document.getElementById('i-mname').value;
+      var id = parseInt(document.getElementById('i-mid').value, 10);
+      if (!/^[A-Za-z0-9_-]{1,10}$/.test(name)) {
+        motorMsg('Name: 1-10 chars A-Z a-z 0-9 _ -', true);
+        return;
+      }
+      if (!isFinite(id) || id < 1 || id > 247) {
+        motorMsg('Slave ID: 1-247 (DIP: 1-31)', true);
+        return;
+      }
+      fetch('/madd?i=' + id + '&n=' + name).then(function(r) { return r.json(); }).then(function(j) {
+        if (j.error) { motorMsg('Add rejected (' + j.error + ')', true); return; }
+        document.getElementById('i-mname').value = '';
+        document.getElementById('i-mid').value = '';
+        motorMsg('Motor "' + name + '" added (ID ' + id + ')', false);
+        return refreshStatus();
+      }).catch(function() { motorMsg('Add request failed', true); });
+    }
+
+    function cmdMotorDel(id, name) {
+      if (homingActive || moveActive || motorState !== 'stopped') return;
+      if (id === activeSlaveId) { motorMsg('Select another motor first', true); return; }
+      if (!confirm('Delete motor "' + name + '" (Slave ID ' + id + ')?')) return;
+      fetch('/mdel?i=' + id).then(function(r) { return r.json(); }).then(function(j) {
+        if (j.error) { motorMsg('Delete rejected (' + j.error + ')', true); return; }
+        motorMsg('Motor "' + name + '" deleted', false);
+        return refreshStatus();
+      }).catch(function() { motorMsg('Delete request failed', true); });
     }
 
     function setJogPressed(id, pressed) {
@@ -240,14 +416,50 @@
       return fetch('/status').then(function(r) { return r.json(); }).then(function(d) {
         lastStatus = d;
         isHomed = (d.homed === true);
+        limitsOn = (d.limits_active === true);
+        if (limitsOn) {
+          limit1Mm = Math.abs(cmdPulsesToMm(d.limit1_cmd));
+          limit2Mm = Math.abs(cmdPulsesToMm(d.limit2_cmd));
+        }
+        activeSlaveId = d.slave_id || 0;
+        if (typeof d.speed_rpm === 'number') {
+          var sEl = document.getElementById('spd');
+          sEl.textContent = 'Speed: ' + d.speed_rpm + ' rpm (JOG, guarded jogs and Go to)';
+          sEl.style.color = '#9e9e9e';
+          var sIn = document.getElementById('i-speed');
+          if (document.activeElement !== sIn && !sIn.value) sIn.value = d.speed_rpm;
+        }
         if (!holdActive && d.motor_state) {
           syncMotorStateFromServer(d.motor_state);
         }
         document.getElementById('uptime').textContent = Math.floor(d.uptime / 1000) + ' s';
         updateHomingUi(d);
         updateMoveUi(d);
-        setMotionButtonsEnabled(!homingActive && !moveActive);
+        var gl = guardMoving() ? lastStatus.guard_limit : 0;
+        setMotionButtonsEnabled(!homingActive && !moveActive, gl === 1, gl === 2);
+        renderMotors(d, !homingActive && !moveActive && motorState === 'stopped');
         updateMotorUi();
+
+        // Acknowledgeable warning pop-ups: a limit was reached (or the motor
+        // was brought back to it) during a guarded jog move.
+        if (d.limit1_hit === true && !limit1AlertShown) {
+          limit1AlertShown = true;
+          alert('LIMIT 1 REACHED (' + limit1Mm.toFixed(2) + ' mm)\n\n' +
+                'The motor stopped at the lower limit.\n' +
+                'CCW motion cannot go below this position.');
+        }
+        if (d.limit1_hit !== true) {
+          limit1AlertShown = false;
+        }
+        if (d.limit2_hit === true && !limit2AlertShown) {
+          limit2AlertShown = true;
+          alert('LIMIT 2 REACHED (' + limit2Mm.toFixed(2) + ' mm)\n\n' +
+                'The motor stopped at the upper limit.\n' +
+                'CW motion cannot go above this position.');
+        }
+        if (d.limit2_hit !== true) {
+          limit2AlertShown = false;
+        }
       });
     }
 
@@ -269,6 +481,11 @@
           clearJogPressed();
           updateMotorUi();
           return;
+        }
+        if (j.move_state !== undefined) {
+          // Guarded CCW accepted: the firmware runs a bounded PR0 move whose
+          // target is Limit 1. Keep the hold; releasing sends /stop.
+          return refreshStatus();
         }
         if (j.motor_state) syncMotorStateFromServer(j.motor_state);
         updateMotorUi();
@@ -315,13 +532,41 @@
       });
     }
 
+    function cmdSpeed() {
+      if (homingActive || moveActive) return;
+      var el = document.getElementById('spd');
+      var v = parseInt(document.getElementById('i-speed').value, 10);
+      if (!isFinite(v) || v < 5 || v > 400) {
+        el.textContent = 'Speed: enter 5 - 400 rpm';
+        el.style.color = '#e57373';
+        return;
+      }
+      fetch('/speed?v=' + v).then(function(r) { return r.json(); }).then(function(j) {
+        if (j.error) {
+          el.textContent = 'Speed: rejected (' + j.error + ')';
+          el.style.color = '#e57373';
+          return;
+        }
+        return refreshStatus();
+      }).catch(function() {
+        el.textContent = 'Speed: request failed';
+        el.style.color = '#e57373';
+      });
+    }
+
     function cmdGoto() {
       if (homingActive || moveActive || !isHomed) return;
       var mm = parseFloat(document.getElementById('i-goto').value);
+      var el = document.getElementById('move');
       if (!isFinite(mm) || mm < 0) {
-        document.getElementById('move').textContent =
-          'Go to: enter a position >= 0 mm (0 = CCW hard stop)';
-        document.getElementById('move').style.color = '#e57373';
+        el.textContent = 'Go to: enter a position >= 0 mm (0 = CCW hard stop)';
+        el.style.color = '#e57373';
+        return;
+      }
+      if (limitsOn && (mm < limit1Mm - 1e-9 || mm > limit2Mm + 1e-9)) {
+        el.textContent = 'Go to: target outside limits (' +
+          limit1Mm.toFixed(2) + ' \u2013 ' + limit2Mm.toFixed(2) + ' mm)';
+        el.style.color = '#e57373';
         return;
       }
       lastGotoMm = mm;
@@ -330,7 +575,6 @@
       moveActive = true;
       setMotionButtonsEnabled(false);
       document.getElementById('b-goto').classList.add('busy');
-      var el = document.getElementById('move');
       el.textContent = 'Go to: moving to ' + formatMm(mm) + ' mm... (Stop = abort)';
       el.style.color = '#42a5f5';
 
@@ -356,7 +600,8 @@
         'Pass 1: the motor runs CW to the FAR hard stop at 200 rpm.\n' +
         'Pass 2: the motor runs CCW across the WHOLE axis to the near\n' +
         'hard stop; the max length is measured there, then position 0\n' +
-        'is set at that CCW hard stop.\n\n' +
+        'is set at that CCW hard stop.\n' +
+        'Limits are then set at 10 mm and max length - 10 mm.\n\n' +
         'The Stop button is the ONLY way to abort (no automatic timeout).\n' +
         'Make sure the axis is free and stay at the controls.');
       if (!ok) return;
