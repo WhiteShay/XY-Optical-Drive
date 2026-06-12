@@ -1,4 +1,9 @@
 **/bin/
 **/obj/
+!PC app/XYoptDrive/bin/
+!PC app/XYoptDrive/bin/Release/
+!PC app/XYoptDrive/bin/Release/net8.0-windows/
+!PC app/XYoptDrive/bin/Release/net8.0-windows/win-x64/
+!PC app/XYoptDrive/bin/Release/net8.0-windows/win-x64/**
 **/Tests/
 **/tests/
