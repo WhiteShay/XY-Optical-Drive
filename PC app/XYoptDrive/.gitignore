@@ -1,4 +1,6 @@
-bin/Debug/
+bin/*
+!bin/Release/
+bin/Release/**/publish/XYoptDrive.exe
 obj/
 Tests/
 tests/
